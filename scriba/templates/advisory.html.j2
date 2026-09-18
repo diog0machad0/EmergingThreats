@@ -1,0 +1,16 @@
+{% extends "base.html.j2" %}
+
+{% block content %}
+  {% include "components/header.html.j2" %}
+  {% include "components/footer.html.j2" %}
+
+  <main class="report advisory-report">
+    {% include "components/cover.html.j2" %}
+
+    <section class="content-page">
+      <div class="report-body">
+        {{ body_html | safe }}
+      </div>
+    </section>
+  </main>
+{% endblock %}

@@ -1,0 +1,55 @@
+---
+description: Approved Security Vulnerability Notification template used when distributing advisories
+alwaysApply: true
+---
+
+# Security Vulnerability Notification template
+
+This is the business-approved format for the message that accompanies a distributed
+advisory PDF. Do not reword the labels, reorder the fields, or add sections.
+
+```
+Security Vulnerability Notification
+
+Advisory Date: [DD Month YYYY]
+Vulnerability Name: [Vulnerability or advisory name]
+Vendor / Product: [Vendor and affected product]
+CVE(s): [CVE ID(s)]
+Advisory ID: [Vendor advisory ID / N/A]
+Severity: [Critical / High / Medium / Low]
+Affected Versions: [Affected version(s)]
+Fixed Version: [Fixed version / Not available]
+
+Description:
+[Briefly describe the vulnerability, exploitation requirements, and potential impact.]
+
+Recommendations:
+• [Required patch, upgrade, mitigation, or validation action]
+• [Priority and requested completion date]
+Attachments:
+• [Advisory filename].pdf — Security advisory
+```
+
+Note there is no blank line between the last recommendation bullet and `Attachments:`.
+
+## Threat intelligence variant
+
+Advisories with `kind = 'threat_intelligence'` use the same layout, retitled
+`Threat Intelligence Notification`, with `Vulnerability Name` reading `Threat Name`
+and the `CVE(s)`, `Affected Versions`, and `Fixed Version` lines removed. Everything
+else, including `Advisory ID` and the priority bullet, is unchanged.
+
+## Implementation rules
+
+- Source of truth: `NOTIFICATION_TEMPLATE` and `TI_NOTIFICATION_TEMPLATE` in
+  `EmergingJoes/advisory_notification.py`. Change them there first.
+- The LLM returns **field values as JSON only**. Layout is rendered in code by `render()`,
+  which must stay pure (no network, config, or file reads) so it is testable without an API key.
+- Never let the model emit the assembled message; it drops and renames lines.
+- Unknown fields render as `N/A` (or `Not available` for Fixed Version). The prompt forbids
+  guessing versions, advisory IDs, and severities.
+- Advisory Date, Attachments, and the priority bullet are computed in code, not by the LLM.
+  Remediation deadlines come from `REMEDIATION_DAYS`, not from the model.
+- Message building must never block distribution: fall back to database-derived fields on any failure.
+- Do **not** put the cross-article "which other customers are affected" roll-up into the message.
+  Slack channels are shared and it would leak one customer's exposure to another.

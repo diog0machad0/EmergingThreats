@@ -1,0 +1,245 @@
+{% extends "base.html" %}
+
+{% block title %}Customers - JOES Threat Intelligence{% endblock %}
+
+{% block content %}
+<div class="customers-page">
+    <div class="customers-header">
+        <h1 class="page-title">Customers</h1>
+        <p class="customers-subtitle">Track customer profiles, affiliates, and technology footprint</p>
+    </div>
+
+    <section class="customers-form-section">
+        <h2 class="customers-section-title" id="customer-form-title">Add Customer</h2>
+        <form id="customer-form" class="customer-form" onsubmit="submitCustomer(event)">
+            <input type="hidden" id="customer-id" value="">
+            <div class="customer-form-grid">
+                <div class="form-group">
+                    <label for="customer-name">Name *</label>
+                    <input type="text" id="customer-name" class="form-input" required placeholder="Company name">
+                </div>
+                <div class="form-group">
+                    <label for="customer-country">Country *</label>
+                    <input type="text" id="customer-country" class="form-input" required placeholder="e.g. Portugal">
+                </div>
+                <div class="form-group customer-form-full">
+                    <label for="customer-business">Business *</label>
+                    <input type="text" id="customer-business" class="form-input" required placeholder="Industry and core business">
+                </div>
+                <div class="form-group customer-form-full">
+                    <label for="customer-affiliates">Known affiliates</label>
+                    <textarea id="customer-affiliates" class="form-input" rows="4" placeholder="One affiliate per line"></textarea>
+                </div>
+                <div class="form-group customer-form-full">
+                    <label for="customer-tech">Known tech stack</label>
+                    <textarea id="customer-tech" class="form-input" rows="4" placeholder="One technology per line (e.g. Ivanti VPN)"></textarea>
+                </div>
+            </div>
+            <div class="customer-form-actions">
+                <button type="submit" class="btn btn-primary" id="customer-submit-btn">Add Customer</button>
+                <button type="button" class="btn btn-secondary" id="customer-cancel-btn" style="display:none" onclick="cancelEditCustomer()">Cancel</button>
+                <span class="save-status" id="customer-form-status"></span>
+            </div>
+        </form>
+    </section>
+
+    <section class="customers-list-section">
+        <div class="customers-list-header">
+            <h2 class="customers-section-title">Customer Profiles</h2>
+            <span class="customers-count" id="customers-count"></span>
+        </div>
+        <div class="customers-grid" id="customers-grid"></div>
+        <div class="customers-empty" id="customers-empty" style="display:none;">
+            <p>No customers yet. Add one using the form above.</p>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let customersSearchTimer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadStats();
+    loadCustomers();
+
+    const searchInput = document.getElementById('search-input');
+    if (searchInput) {
+        searchInput.placeholder = 'Search customers...';
+        searchInput.addEventListener('input', () => {
+            clearTimeout(customersSearchTimer);
+            customersSearchTimer = setTimeout(loadCustomers, 300);
+        });
+    }
+});
+
+async function loadCustomers() {
+    const grid = document.getElementById('customers-grid');
+    const empty = document.getElementById('customers-empty');
+    const search = document.getElementById('search-input')?.value.trim() || '';
+    const params = search ? '?search=' + encodeURIComponent(search) : '';
+
+    try {
+        const res = await fetch('/api/customers' + params);
+        const customers = await res.json();
+        grid.innerHTML = '';
+
+        document.getElementById('customers-count').textContent =
+            `${customers.length} customer${customers.length === 1 ? '' : 's'}`;
+
+        if (customers.length === 0) {
+            empty.style.display = 'block';
+        } else {
+            empty.style.display = 'none';
+            customers.forEach(c => grid.appendChild(createCustomerCard(c)));
+        }
+    } catch (e) {
+        console.error('Failed to load customers:', e);
+    }
+}
+
+function createCustomerCard(customer) {
+    const card = document.createElement('article');
+    card.className = 'customer-card';
+    card.innerHTML = `
+        <div class="customer-card-header">
+            <h3 class="customer-name">${escHtml(customer.name)}</h3>
+            <span class="customer-country">${escHtml(customer.country)}</span>
+        </div>
+        <p class="customer-business">${escHtml(customer.business)}</p>
+        <div class="customer-lists">
+            <div class="customer-list-block">
+                <h4>Known affiliates</h4>
+                ${renderList(customer.known_affiliates, 'No affiliates listed')}
+            </div>
+            <div class="customer-list-block">
+                <h4>Known tech stack</h4>
+                ${renderTechList(customer.known_tech_stack)}
+            </div>
+        </div>
+        <div class="customer-card-actions">
+            <button class="btn btn-secondary btn-sm" onclick="editCustomer(${customer.id})">Edit</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteCustomer(${customer.id}, '${escAttr(customer.name)}')">Delete</button>
+        </div>
+    `;
+    return card;
+}
+
+function renderList(items, emptyText) {
+    if (!items || items.length === 0) {
+        return `<p class="customer-list-empty">${escHtml(emptyText)}</p>`;
+    }
+    return '<ul class="customer-list">' +
+        items.map(i => `<li>${escHtml(i)}</li>`).join('') +
+        '</ul>';
+}
+
+function renderTechList(items) {
+    if (!items || items.length === 0) {
+        return '<p class="customer-list-empty">No technologies listed</p>';
+    }
+    return '<div class="customer-tech-tags">' +
+        items.map(i => `<span class="customer-tech-tag">${escHtml(i)}</span>`).join('') +
+        '</div>';
+}
+
+function linesFromTextarea(id) {
+    return document.getElementById(id).value
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean);
+}
+
+async function submitCustomer(event) {
+    event.preventDefault();
+    const id = document.getElementById('customer-id').value;
+    const payload = {
+        name: document.getElementById('customer-name').value.trim(),
+        business: document.getElementById('customer-business').value.trim(),
+        country: document.getElementById('customer-country').value.trim(),
+        known_affiliates: linesFromTextarea('customer-affiliates'),
+        known_tech_stack: linesFromTextarea('customer-tech'),
+    };
+    const status = document.getElementById('customer-form-status');
+    status.textContent = 'Saving...';
+    status.style.color = 'var(--text-secondary)';
+
+    try {
+        const res = await fetch(id ? `/api/customers/${id}` : '/api/customers', {
+            method: id ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            status.textContent = data.error || 'Failed to save';
+            status.style.color = 'var(--accent-red)';
+            return;
+        }
+        status.textContent = id ? 'Customer updated' : 'Customer added';
+        status.style.color = 'var(--accent-green)';
+        resetCustomerForm();
+        loadCustomers();
+        setTimeout(() => { status.textContent = ''; }, 3000);
+    } catch (e) {
+        status.textContent = 'Network error';
+        status.style.color = 'var(--accent-red)';
+    }
+}
+
+async function editCustomer(id) {
+    try {
+        const res = await fetch(`/api/customers/${id}`);
+        const c = await res.json();
+        if (!res.ok) return;
+
+        document.getElementById('customer-id').value = c.id;
+        document.getElementById('customer-name').value = c.name;
+        document.getElementById('customer-business').value = c.business;
+        document.getElementById('customer-country').value = c.country;
+        document.getElementById('customer-affiliates').value = (c.known_affiliates || []).join('\n');
+        document.getElementById('customer-tech').value = (c.known_tech_stack || []).join('\n');
+        document.getElementById('customer-form-title').textContent = 'Edit Customer';
+        document.getElementById('customer-submit-btn').textContent = 'Save Changes';
+        document.getElementById('customer-cancel-btn').style.display = 'inline-flex';
+        document.getElementById('customer-form').scrollIntoView({ behavior: 'smooth' });
+    } catch (e) {
+        console.error('Failed to load customer:', e);
+    }
+}
+
+function cancelEditCustomer() {
+    resetCustomerForm();
+}
+
+function resetCustomerForm() {
+    document.getElementById('customer-form').reset();
+    document.getElementById('customer-id').value = '';
+    document.getElementById('customer-form-title').textContent = 'Add Customer';
+    document.getElementById('customer-submit-btn').textContent = 'Add Customer';
+    document.getElementById('customer-cancel-btn').style.display = 'none';
+}
+
+async function deleteCustomer(id, name) {
+    if (!confirm(`Delete customer "${name}"?`)) return;
+    try {
+        const res = await fetch(`/api/customers/${id}`, { method: 'DELETE' });
+        if (res.ok) loadCustomers();
+    } catch (e) {
+        console.error('Failed to delete customer:', e);
+    }
+}
+
+function escHtml(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+}
+
+function escAttr(str) {
+    return escHtml(str).replace(/'/g, '&#39;');
+}
+</script>
+{% endblock %}

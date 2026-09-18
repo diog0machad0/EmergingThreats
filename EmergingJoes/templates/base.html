@@ -1,0 +1,226 @@
+{#
+  Layout shell mirrors JOES AIR's AppShell: a global 62px header above a
+  fixed-width nav rail, both wrapped in an inset rounded frame. The frame owns
+  scrolling, so .content-area is the scroll container rather than the window.
+#}
+{%- set nav_items = [
+    ('/', 'Feed', 'rss'),
+    ('/intelligence', 'Intelligence', 'search'),
+    ('/emerging-threats', 'Emerging Threats', 'shield-alert'),
+    ('/feeds', 'Feeds', 'satellite-dish'),
+    ('/customers', 'Customers', 'users'),
+    ('/apt', 'APT', 'crosshair'),
+    ('/settings', 'Settings', 'settings'),
+] -%}
+{%- set page_labels = {
+    '/': 'Feed',
+    '/intelligence': 'Intelligence',
+    '/emerging-threats': 'Emerging Threats',
+    '/feeds': 'Feeds',
+    '/customers': 'Customers',
+    '/apt': 'APT Tracking',
+    '/settings': 'Settings',
+} -%}
+{%- macro lucide(name) -%}
+<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{%- if name == 'rss' -%}
+<path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/>
+{%- elif name == 'search' -%}
+<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+{%- elif name == 'shield-alert' -%}
+<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+{%- elif name == 'satellite-dish' -%}
+<path d="M4 10a7.31 7.31 0 0 0 10 10Z"/><path d="m9 15 3-3"/><path d="M17 13a6 6 0 0 0-6-6"/><path d="M21 13A10 10 0 0 0 11 3"/>
+{%- elif name == 'users' -%}
+<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+{%- elif name == 'crosshair' -%}
+<circle cx="12" cy="12" r="10"/><line x1="22" x2="18" y1="12" y2="12"/><line x1="6" x2="2" y1="12" y2="12"/><line x1="12" x2="12" y1="6" y2="2"/><line x1="12" x2="12" y1="22" y2="18"/>
+{%- elif name == 'settings' -%}
+<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>
+{%- endif -%}
+</svg>
+{%- endmacro -%}
+<!DOCTYPE html>
+<html lang="en" class="dark" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}JOES Threat Intelligence{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg') }}">
+</head>
+<body>
+    <div class="app-shell">
+        <div class="app-frame">
+            <header class="global-header">
+                <a href="/" class="header-brand">
+                    <img src="{{ url_for('static', filename='img/joes-wordmark.svg') }}" alt="JOES" class="brand-logo">
+                    <span class="brand-divider"></span>
+                    <span class="brand-product">
+                        Threat Intelligence
+                        <span class="brand-product-sub">{{ page_labels.get(request.path, 'Platform') }}</span>
+                    </span>
+                </a>
+                <div class="search-wrapper">
+                    <input type="text" id="search-input" class="search-input" placeholder="Search articles...">
+                </div>
+                <span class="refresh-status" id="refresh-status"></span>
+            </header>
+
+            <div class="app-body">
+                <aside class="sidebar">
+                    <nav class="sidebar-nav">
+                        {% for path, label, icon in nav_items %}
+                        <a href="{{ path }}" class="nav-item {% if request.path == path %}active{% endif %}">
+                            {{ lucide(icon) }}
+                            <span>{{ label }}</span>
+                        </a>
+                        {% endfor %}
+                    </nav>
+                    <div class="sidebar-stats" id="sidebar-stats">
+                        <div class="stat-item">
+                            <span class="stat-label">Articles</span>
+                            <span class="stat-value" id="stat-articles">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Sources</span>
+                            <span class="stat-value" id="stat-sources">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Summaries</span>
+                            <span class="stat-value" id="stat-summaries">--</span>
+                        </div>
+                        <div class="stat-item stat-item-clickable" id="stat-item-unsummarized" style="display:none;cursor:pointer" onclick="openFailureModal('unsummarized', 'Unsummarized Articles')">
+                            <span class="stat-label">Unsummarized</span>
+                            <span class="stat-value" id="stat-unsummarized"></span>
+                        </div>
+                        <div class="stat-item stat-item-clickable" id="stat-item-scrape-failed" style="display:none;cursor:pointer" onclick="openFailureModal('scrape_failed', 'Scrape Failed Articles')">
+                            <span class="stat-label">Scrape failed</span>
+                            <span class="stat-value" id="stat-scrape-failed"></span>
+                        </div>
+                        <div class="stat-item stat-item-clickable" id="stat-item-failed-summaries" style="display:none;cursor:pointer" onclick="openFailureModal('failed_summaries', 'Summary Failed Articles')">
+                            <span class="stat-label">Summary failed</span>
+                            <span class="stat-value" id="stat-failed-summaries"></span>
+                        </div>
+                    </div>
+                </aside>
+
+                <main class="main-content">
+                    <div class="page-toolbar">
+                        <div class="refresh-controls">
+                            <input type="number" id="refresh-days" class="days-input" value="1" min="1" max="30" title="Days to look back">
+                            <span class="days-label">days</span>
+                            <button class="btn btn-primary" id="refresh-btn" onclick="triggerRefresh()">
+                                <span class="btn-icon">&#8635;</span> Refresh
+                            </button>
+                            <button class="btn btn-secondary refresh-since-btn" onclick="refreshSinceLastRetrieval()">
+                                <span class="btn-icon">&#8635;</span> Since Last Retrieval
+                            </button>
+                            <button class="btn btn-secondary" id="embed-btn" onclick="triggerEmbed()" title="Generate embeddings for all summarized articles that don't have one yet">
+                                <span class="btn-icon">&#9670;</span> Generate Embeddings
+                            </button>
+                            <button class="btn btn-secondary" id="ingest-btn" onclick="showIngestDialog()" title="Process specific article URLs">
+                                <span class="btn-icon">&#8659;</span> Ingest URLs
+                            </button>
+                            <button class="btn btn-secondary" id="digest-btn" onclick="sendDigestNow()" title="Send the daily digest email now" style="display:none">
+                                <span class="btn-icon">&#9993;</span> Send Digest
+                            </button>
+                            <button class="btn btn-danger" id="abort-btn" onclick="abortPipeline()" title="Stop the running pipeline between stages" style="display:none">
+                                &#9632; Abort
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="content-area">
+                        {% block content %}{% endblock %}
+                    </div>
+                </main>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cost Estimate Confirmation Modal -->
+    <div class="modal-overlay" id="cost-estimate-modal" style="display:none">
+        <div class="modal-dialog">
+            <h3 class="modal-title">Summarization Cost Estimate</h3>
+            <p class="modal-body" id="cost-estimate-body"></p>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="approveCost()">Proceed</button>
+                <button class="btn btn-secondary" onclick="declineCost()">Skip</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Insight Cost Estimate Modal (Trend Analysis / Forecast) -->
+    <div class="modal-overlay" id="insight-estimate-modal" style="display:none">
+        <div class="modal-dialog">
+            <h3 class="modal-title" id="insight-estimate-title">Cost Estimate</h3>
+            <p class="modal-body" id="insight-estimate-body"></p>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="insightProceed()">Proceed</button>
+                <button class="btn btn-secondary" onclick="insightCancel()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Insight Actual Cost Modal (shown after Trend Analysis / Forecast) -->
+    <div class="modal-overlay" id="insight-actual-modal" style="display:none">
+        <div class="modal-dialog">
+            <h3 class="modal-title" id="insight-actual-title">Generation Complete</h3>
+            <p class="modal-body" id="insight-actual-body"></p>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="dismissInsightActual()">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Actual Cost Result Modal -->
+    <div class="modal-overlay" id="actual-cost-modal" style="display:none">
+        <div class="modal-dialog">
+            <h3 class="modal-title">Summarization Complete</h3>
+            <p class="modal-body" id="actual-cost-body"></p>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="dismissActualCost()">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Ingest URLs Modal -->
+    <div class="modal-overlay" id="ingest-modal" style="display:none">
+        <div class="modal-dialog">
+            <h3 class="modal-title">Process Article URLs</h3>
+            <p class="modal-body">Enter one URL per line. Articles will be scraped and summarized using your configured LLM.</p>
+            <textarea id="ingest-urls-input" class="form-input" rows="8" style="width:100%;box-sizing:border-box;margin:8px 0 4px;font-size:0.85rem;" placeholder="https://example.com/article-1&#10;https://example.com/article-2"></textarea>
+            <span class="save-status" id="ingest-urls-status" style="display:block;min-height:1.2em;margin-bottom:8px;"></span>
+            <div class="modal-actions">
+                <button class="btn btn-primary" id="ingest-submit-btn" onclick="ingestUrls()">Process</button>
+                <button class="btn btn-secondary" onclick="hideIngestDialog()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Failure Articles Modal -->
+    <div class="modal-overlay" id="failure-modal" style="display:none">
+        <div class="modal-dialog" style="max-width:640px;width:100%">
+            <h3 class="modal-title" id="failure-modal-title">Articles</h3>
+            <div id="failure-modal-list" style="margin-bottom:12px;max-height:380px;overflow-y:auto;"></div>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:0.85rem;color:var(--text-secondary)">
+                <button class="btn btn-secondary" id="failure-prev-btn" onclick="failurePageChange(-1)">&#8592; Prev</button>
+                <span id="failure-page-label"></span>
+                <button class="btn btn-secondary" id="failure-next-btn" onclick="failurePageChange(1)">Next &#8594;</button>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-primary" id="failure-reprocess-btn" onclick="reprocessSelected()" disabled>Re-process Selected</button>
+                <button class="btn btn-secondary" onclick="closeFailureModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

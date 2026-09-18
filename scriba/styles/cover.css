@@ -1,0 +1,116 @@
+.cover-page {
+  page: cover;
+  break-after: page;
+  margin: 0;
+  padding: 0;
+  position: relative;
+  width: 100%;
+  height: 297mm;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.cover-hero {
+  position: relative;
+  width: 100%;
+  flex: 0 0 117.7mm;
+  background-color: #0a1320;
+  background-image: url("../assets/cover-bg.png");
+  background-size: 100% 100%;
+  background-position: center top;
+  background-repeat: no-repeat;
+  overflow: hidden;
+}
+
+.cover-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 18mm 25.4mm 16mm;
+  text-align: center;
+}
+
+.cover-title-block {
+  margin-top: 4mm;
+}
+
+.cover-title {
+  margin: 0 0 6pt;
+  font-family: "Calibri Light", "Calibri", "Carlito", "Ubuntu", "Helvetica Neue", Arial, sans-serif;
+  font-size: 28pt;
+  font-weight: 700;
+  color: #000000;
+  line-height: 1.1;
+  letter-spacing: -0.005em;
+}
+
+.cover-identifier {
+  margin: 4pt 0 12pt;
+  font-family: "Calibri Light", "Calibri", "Carlito", "Ubuntu", "Helvetica Neue", Arial, sans-serif;
+  font-size: 24pt;
+  color: var(--accent-strong);
+  font-style: italic;
+  font-weight: 700;
+}
+
+.cover-subtitle {
+  margin: 6pt 0 4pt;
+  font-family: "Calibri Light", "Calibri", "Carlito", "Ubuntu", "Helvetica Neue", Arial, sans-serif;
+  font-size: 24pt;
+  color: var(--accent-vivid);
+  font-weight: 400;
+}
+
+.cover-date {
+  margin: 0;
+  font-size: 18pt;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.cover-disclaimer {
+  max-width: 130mm;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.disclaimer-heading {
+  margin: 0 0 6pt;
+  font-size: 8pt;
+  font-weight: 700;
+  letter-spacing: 0.20em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.disclaimer-body {
+  margin: 0 0 8mm;
+  font-size: 8pt;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.cover-logo-footer {
+  display: block;
+  margin: 0 auto;
+  height: 18mm;
+  width: auto;
+}
+
+@page cover {
+  margin: 0;
+  size: A4;
+
+  @top-left-corner { content: none; }
+  @top-right-corner { content: none; }
+  @bottom-left-corner { content: none; }
+  @bottom-right-corner { content: none; }
+  @top-left { content: none; }
+  @top-center { content: none; }
+  @top-right { content: none; }
+  @bottom-left { content: none; }
+  @bottom-center { content: none; }
+  @bottom-right { content: none; }
+}

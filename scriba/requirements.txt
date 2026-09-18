@@ -1,0 +1,6 @@
+jinja2
+markdown-it-py
+mdit-py-plugins
+pyyaml
+beautifulsoup4
+weasyprint

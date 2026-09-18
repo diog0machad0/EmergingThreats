@@ -1,0 +1,20 @@
+# JOES Threat Intelligence — Python dependencies
+# Install: pip install -r requirements.txt
+# Python 3.10+
+
+flask>=3.0
+feedparser>=6.0
+trafilatura>=1.0
+newspaper3k>=0.2
+openai>=1.0
+anthropic>=0.30
+apscheduler>=3.10
+requests>=2.31
+lxml_html_clean
+numpy>=1.24
+python-dotenv>=1.0
+pymisp>=2.4.180
+slack_sdk>=3.27
+
+# Note: PDF advisories use the sibling scriba/ project (WeasyPrint + OS libs).
+# See ../INSTALL.md and ../scriba/requirements.txt

@@ -1,0 +1,30 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment & secrets (never commit)
+.env
+.env.local
+.env.*.local
+
+# Application data (secrets, database)
+data/config.json
+config.json
+data/*.db
+data/*.db-shm
+data/*.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Generated docs site
+site/
+
+# IDE / tooling
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo

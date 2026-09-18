@@ -1,0 +1,28 @@
+<section class="cover-page">
+  <div class="cover-hero" aria-hidden="true"></div>
+
+  <div class="cover-body">
+    <div class="cover-title-block">
+      <h1 class="cover-title">{{ title_main }}</h1>
+      {% if title_identifier %}
+        <p class="cover-identifier">{{ title_identifier }}</p>
+      {% endif %}
+      {% if subtitle %}
+        <p class="cover-subtitle">{{ subtitle }}</p>
+      {% endif %}
+      <p class="cover-date">{{ display_date }}</p>
+    </div>
+
+    <div class="cover-disclaimer">
+      <p class="disclaimer-heading">{{ metadata.classification | upper }}</p>
+      <p class="disclaimer-body">
+        This document is the proprietary material of {{ metadata.author }} and prepared for its
+        client. By having access to this document, you agree to maintain strict confidentiality
+        regarding its content. Disclosure of the same to any person/agency, whom
+        {{ metadata.author }} would deem to be its competitor, would be considered a violation of
+        confidentiality.
+      </p>
+      <img class="cover-logo-footer" src="assets/logo.png" alt="{{ metadata.author }}">
+    </div>
+  </div>
+</section>

@@ -1,0 +1,366 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - JOES Threat Intelligence{% endblock %}
+
+{% block content %}
+<div class="settings-page">
+    <h1 class="page-title">Settings</h1>
+
+    <section class="settings-section">
+        <h2>LLM Provider</h2>
+        <div class="form-group">
+            <div class="provider-toggle" id="provider-toggle">
+                <button type="button" class="provider-btn {% if config.llm_provider == 'openai' or not config.llm_provider %}active{% endif %}" data-provider="openai" onclick="switchProvider('openai')">OpenAI</button>
+                <button type="button" class="provider-btn {% if config.llm_provider == 'anthropic' %}active{% endif %}" data-provider="anthropic" onclick="switchProvider('anthropic')">Anthropic</button>
+                <button type="button" class="provider-btn {% if config.llm_provider == 'openrouter' %}active{% endif %}" data-provider="openrouter" onclick="switchProvider('openrouter')">OpenRouter</button>
+            </div>
+            <input type="hidden" id="llm-provider" value="{{ config.llm_provider or 'openai' }}">
+            <p class="form-hint" style="margin-top:8px;">Used for summarization, threat analysis, advisory generation, and intelligence chat. All three providers are supported across those flows.</p>
+        </div>
+
+        <!-- OpenAI section -->
+        <div id="openai-section" {% if config.llm_provider in ['anthropic', 'openrouter'] %}style="display:none;"{% endif %}>
+            <div class="form-group">
+                <label for="api-key">OpenAI API Key</label>
+                <div class="input-with-action">
+                    <input type="password" id="api-key" class="form-input" placeholder="sk-..." value="{{ config.openai_api_key or '' }}">
+                    <button class="btn btn-secondary btn-sm" onclick="testApiKey()">Test</button>
+                </div>
+                <span class="form-hint" id="api-key-status"></span>
+            </div>
+            <div class="form-group">
+                <label for="model-select">Model</label>
+                <select id="model-select" class="form-input">
+                    <option value="gpt-4.1-mini" {% if config.openai_model == 'gpt-4.1-mini' %}selected{% endif %}>gpt-4.1-mini (Default)</option>
+                    <option value="gpt-5-mini" {% if config.openai_model == 'gpt-5-mini' %}selected{% endif %}>gpt-5-mini</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Anthropic section -->
+        <div id="anthropic-section" {% if config.llm_provider != 'anthropic' %}style="display:none;"{% endif %}>
+            <div class="form-group">
+                <label for="anthropic-key">Anthropic API Key</label>
+                <div class="input-with-action">
+                    <input type="password" id="anthropic-key" class="form-input" placeholder="sk-ant-..." value="{{ config.anthropic_api_key or '' }}">
+                    <button class="btn btn-secondary btn-sm" onclick="testAnthropicKey()">Test</button>
+                </div>
+                <span class="form-hint" id="anthropic-key-status"></span>
+            </div>
+            <div class="form-group">
+                <label for="anthropic-model-select">Model</label>
+                <select id="anthropic-model-select" class="form-input">
+                    <option value="claude-haiku-4-5-20251001" {% if config.anthropic_model == 'claude-haiku-4-5-20251001' %}selected{% endif %}>claude-haiku-4-5 (Recommended)</option>
+                    <option value="claude-sonnet-4-6" {% if config.anthropic_model == 'claude-sonnet-4-6' %}selected{% endif %}>claude-sonnet-4-6</option>
+                    <option value="claude-opus-4-6" {% if config.anthropic_model == 'claude-opus-4-6' %}selected{% endif %}>claude-opus-4-6</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- OpenRouter section -->
+        <div id="openrouter-section" {% if config.llm_provider != 'openrouter' %}style="display:none;"{% endif %}>
+            <div class="form-group">
+                <label for="openrouter-key">OpenRouter API Key</label>
+                <div class="input-with-action">
+                    <input type="password" id="openrouter-key" class="form-input" placeholder="sk-or-..." value="{{ config.openrouter_api_key or '' }}">
+                    <button class="btn btn-secondary btn-sm" onclick="testOpenRouterKey()">Test</button>
+                </div>
+                <span class="form-hint" id="openrouter-key-status"></span>
+                <p class="form-hint" style="margin-top:6px;">
+                    Get a key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.
+                    Free models end with <code>:free</code>.
+                </p>
+            </div>
+            <div class="form-group">
+                <label for="openrouter-model-select">Model</label>
+                <select id="openrouter-model-select" class="form-input">
+                    <option value="meta-llama/llama-3.3-70b-instruct:free" {% if config.openrouter_model == 'meta-llama/llama-3.3-70b-instruct:free' %}selected{% endif %}>Llama 3.3 70B Instruct (free)</option>
+                    <option value="google/gemma-3-27b-it:free" {% if config.openrouter_model == 'google/gemma-3-27b-it:free' %}selected{% endif %}>Gemma 3 27B IT (free)</option>
+                    <option value="qwen/qwen3-14b:free" {% if config.openrouter_model == 'qwen/qwen3-14b:free' %}selected{% endif %}>Qwen3 14B (free)</option>
+                    <option value="mistralai/mistral-small-3.1-24b-instruct:free" {% if config.openrouter_model == 'mistralai/mistral-small-3.1-24b-instruct:free' %}selected{% endif %}>Mistral Small 3.1 24B (free)</option>
+                    <option value="openrouter/free" {% if config.openrouter_model == 'openrouter/free' %}selected{% endif %}>OpenRouter free router</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Embeddings key for non-OpenAI providers -->
+        <div id="embed-key-section" {% if config.llm_provider not in ['anthropic', 'openrouter'] %}style="display:none;"{% endif %}>
+            <div class="form-group" style="margin-top:8px;">
+                <p class="form-hint">Embeddings / semantic search still use OpenAI. Add an OpenAI key below if you want those features while using Anthropic or OpenRouter for LLM tasks.</p>
+            </div>
+            <div class="form-group">
+                <label for="embed-api-key">OpenAI API Key <span style="font-weight:400;color:var(--text-secondary);">(for embeddings)</span></label>
+                <div class="input-with-action">
+                    <input type="password" id="embed-api-key" class="form-input" placeholder="sk-..." value="{{ config.openai_api_key or '' }}">
+                    <button class="btn btn-secondary btn-sm" onclick="testEmbedApiKey()">Test</button>
+                </div>
+                <span class="form-hint" id="embed-api-key-status"></span>
+            </div>
+        </div>
+    </section>
+
+    <section class="settings-section">
+        <h2>Malpedia</h2>
+        <p class="form-hint">Optional. Adds Malpedia's curated threat-research library as an article source.
+            <a href="https://malpedia.caad.fkie.fraunhofer.de/" target="_blank">Get an API key</a>
+        </p>
+        <div class="form-group">
+            <label for="malpedia-key">API Key</label>
+            <div class="input-with-action">
+                <input type="password" id="malpedia-key" class="form-input" placeholder="API token..." value="{{ config.malpedia_api_key or '' }}">
+                <button class="btn btn-secondary btn-sm" onclick="testMalpediaKey()">Test</button>
+            </div>
+            <span class="form-hint" id="malpedia-key-status"></span>
+        </div>
+        {% set malpedia_source = source_map.get('https://malpedia.caad.fkie.fraunhofer.de/library') %}
+        {% if malpedia_source and malpedia_source.last_fetched %}
+        <p class="form-hint">Last fetched: {{ malpedia_source.last_fetched }}</p>
+        {% endif %}
+    </section>
+
+    <section class="settings-section">
+        <h2>MISP Integration</h2>
+        <p class="form-hint" style="margin-bottom:16px;">
+            APT IOCs from summarized articles are exported to MISP and linked to Threat Actor galaxy clusters.
+            Install MISP with <code>./misp/setup.sh</code> in the project root.
+        </p>
+        <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+            <label class="toggle-label" style="margin:0;">
+                <input type="checkbox" id="misp-enabled" class="feed-toggle" {% if config.misp_enabled != false %}checked{% endif %}>
+                <span class="toggle-slider"></span>
+            </label>
+            <span style="font-size:0.9rem;color:var(--text-primary);font-weight:500;">Enable MISP IOC export</span>
+        </div>
+        <div class="form-group">
+            <label for="misp-url">MISP URL</label>
+            <input type="text" id="misp-url" class="form-input" placeholder="https://127.0.0.1:8443" value="{{ config.misp_url or 'https://127.0.0.1:8443' }}">
+        </div>
+        <div class="form-group">
+            <label for="misp-api-key">MISP API Key</label>
+            <div class="input-with-btn">
+                <input type="password" id="misp-api-key" class="form-input" placeholder="Auth key from MISP user profile" value="{{ config.misp_api_key or '' }}">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="testMispConnection()">Test</button>
+            </div>
+            <span class="form-hint" id="misp-test-status"></span>
+        </div>
+        <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+            <label class="toggle-label" style="margin:0;">
+                <input type="checkbox" id="misp-verify-ssl" class="feed-toggle" {% if config.misp_verify_ssl %}checked{% endif %}>
+                <span class="toggle-slider"></span>
+            </label>
+            <span style="font-size:0.9rem;color:var(--text-secondary);">Verify SSL certificate (disable for local self-signed)</span>
+        </div>
+    </section>
+
+    <section class="settings-section">
+        <h2>Slack Integration</h2>
+        <p class="form-hint" style="margin-bottom:16px;">
+            Distribute advisory PDFs to Slack. When creating an advisory you pick the target channels,
+            and the PDF is uploaded with a crafted message.
+        </p>
+        <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+            <label class="toggle-label" style="margin:0;">
+                <input type="checkbox" id="slack-enabled" class="feed-toggle" {% if config.slack_enabled %}checked{% endif %}>
+                <span class="toggle-slider"></span>
+            </label>
+            <span style="font-size:0.9rem;color:var(--text-primary);font-weight:500;">Enable Slack advisory distribution</span>
+        </div>
+        <div class="form-group">
+            <label for="slack-bot-token">Slack Token</label>
+            <div class="input-with-btn">
+                <input type="password" id="slack-bot-token" class="form-input" placeholder="xoxb-... or xoxp-..." value="{{ config.slack_bot_token or '' }}" autocomplete="off">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="testSlackConnection()">Test</button>
+            </div>
+            <span class="form-hint" id="slack-test-status"></span>
+            <span class="form-hint">Test checks the token typed above, but you still have to click <strong>Save Settings</strong> to keep it.</span>
+        </div>
+        <p class="form-hint">
+            Required scopes: <code>chat:write</code>, <code>files:write</code>,
+            <code>channels:read</code>, <code>groups:read</code>.
+        </p>
+        <p class="form-hint">
+            A <strong>bot token</strong> (<code>xoxb-</code>) only sees channels it has been invited to — run
+            <code>/invite @your-bot</code> in each target channel. A <strong>user token</strong>
+            (<code>xoxp-</code>) also works and sees your own channels with no invite needed, but posts
+            as you and breaks if your account is deactivated. With a user token the scopes must be granted
+            under <em>User Token Scopes</em>, not <em>Bot Token Scopes</em>.
+        </p>
+    </section>
+
+    <section class="settings-section">
+        <h2>Email Notifications</h2>
+        <p class="form-hint" style="margin-bottom:16px;">Receive email alerts for threat intelligence. Requires an SMTP server (Gmail, Outlook, SendGrid, etc.).</p>
+        <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+            <label class="toggle-label" style="margin:0;">
+                <input type="checkbox" id="email-enabled" class="feed-toggle" {% if config.email_notifications_enabled %}checked{% endif %} onchange="toggleEmailMode()">
+                <span class="toggle-slider"></span>
+            </label>
+            <span style="font-size:0.9rem;color:var(--text-primary);font-weight:500;">Enable email notifications</span>
+        </div>
+        <div id="email-mode-section" style="margin-top:14px;{% if not config.email_notifications_enabled %}display:none;{% endif %}">
+            <label style="font-size:0.9rem;font-weight:600;color:var(--text-primary);display:block;margin-bottom:8px;">Email Mode</label>
+            <div style="display:flex;flex-direction:column;gap:8px;">
+                <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+                    <input type="radio" name="email-mode" id="email-mode-per-article" value="per_article" {% if config.email_mode != 'digest' %}checked{% endif %} style="margin-top:3px;" onchange="toggleDigestPeriod()">
+                    <span>
+                        <strong style="font-size:0.9rem;">Per-article</strong>
+                        <span class="form-hint" style="display:block;margin:0;">Send an immediate email for each newly processed article.</span>
+                    </span>
+                </label>
+                <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+                    <input type="radio" name="email-mode" id="email-mode-digest" value="digest" {% if config.email_mode == 'digest' %}checked{% endif %} style="margin-top:3px;" onchange="toggleDigestPeriod()">
+                    <span>
+                        <strong style="font-size:0.9rem;">Digest</strong>
+                        <span class="form-hint" style="display:block;margin:0;">Send one consolidated digest email at 5:30 PM IST with related articles grouped into stories. You can also send it immediately from the main toolbar.</span>
+                    </span>
+                </label>
+            </div>
+            <div id="digest-period-section" style="margin-top:12px;padding-left:24px;{% if config.email_mode != 'digest' %}display:none;{% endif %}">
+                <label style="font-size:0.85rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:6px;">Digest Frequency</label>
+                <div style="display:flex;gap:20px;">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.9rem;">
+                        <input type="radio" name="digest-period" id="digest-period-day" value="day" {% if config.digest_period != 'week' %}checked{% endif %}>
+                        Daily <span class="form-hint" style="margin:0;">(every day at 5:30 PM IST)</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.9rem;">
+                        <input type="radio" name="digest-period" id="digest-period-week" value="week" {% if config.digest_period == 'week' %}checked{% endif %}>
+                        Weekly <span class="form-hint" style="margin:0;">(every 7 days at 5:30 PM IST)</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="notification-email">Recipient Email</label>
+            <input type="email" id="notification-email" class="form-input" placeholder="you@example.com" value="{{ config.notification_email or '' }}">
+        </div>
+        <div class="form-row" style="margin-bottom:16px;">
+            <div class="form-group" style="flex:3;margin-bottom:0;">
+                <label for="smtp-host">SMTP Host</label>
+                <input type="text" id="smtp-host" class="form-input" placeholder="smtp.gmail.com" value="{{ config.smtp_host or '' }}">
+            </div>
+            <div class="form-group" style="flex:1;min-width:100px;margin-bottom:0;">
+                <label for="smtp-port">Port</label>
+                <input type="number" id="smtp-port" class="form-input" placeholder="587" value="{{ config.smtp_port or 587 }}">
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="smtp-username">SMTP Username</label>
+            <input type="text" id="smtp-username" class="form-input" placeholder="you@example.com" value="{{ config.smtp_username or '' }}">
+        </div>
+        <div class="form-group">
+            <label for="smtp-password">SMTP Password</label>
+            <input type="password" id="smtp-password" class="form-input" placeholder="App password or SMTP password" value="{{ config.smtp_password or '' }}">
+        </div>
+        <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+            <label class="toggle-label" style="margin:0;">
+                <input type="checkbox" id="smtp-tls" class="feed-toggle" {% if config.smtp_use_tls is not defined or config.smtp_use_tls %}checked{% endif %}>
+                <span class="toggle-slider"></span>
+            </label>
+            <span style="font-size:0.87rem;color:var(--text-secondary);">Use STARTTLS</span>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+            <button class="btn btn-primary" id="test-email-btn" onclick="testEmail()"><span class="btn-icon">&#9993;</span> Send Test Email</button>
+            <span class="form-hint" id="test-email-status"></span>
+        </div>
+    </section>
+
+    <section class="settings-section">
+        <h2>Fetch Settings</h2>
+        <div class="form-group">
+            <label for="fetch-interval">Auto-fetch interval: <span id="interval-value">{{ config.fetch_interval_minutes }}</span> minutes</label>
+            <input type="range" id="fetch-interval" class="form-range" min="5" max="120" step="5" value="{{ config.fetch_interval_minutes }}" oninput="document.getElementById('interval-value').textContent = this.value">
+        </div>
+        <div class="refresh-controls">
+            <input type="number" id="settings-refresh-days" class="days-input" value="1" min="1" max="365" title="Days to look back">
+            <span class="days-label">days</span>
+            <button class="btn btn-primary" id="manual-refresh-btn" onclick="triggerRefresh()">
+                <span class="btn-icon">&#8635;</span> Refresh Now
+            </button>
+            <button class="btn btn-primary refresh-since-btn" onclick="refreshSinceLastRetrieval()">
+                <span class="btn-icon">&#8635;</span> Refresh Since Last Retrieval
+            </button>
+            <span class="refresh-status" id="settings-refresh-status"></span>
+        </div>
+    </section>
+
+    <section class="settings-section">
+        <h2>RSS Feeds</h2>
+        <div class="feed-list" id="feed-list">
+            {% for feed in config.feeds if feed.name != "Cyber Defense Magazine" %}
+            <div class="feed-item" data-index="{{ loop.index0 }}">
+                <label class="toggle-label">
+                    <input type="checkbox" class="feed-toggle" {% if feed.enabled %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <div class="feed-info">
+                    <span class="feed-name">{{ feed.name }}</span>
+                    <span class="feed-url">{{ feed.url }}</span>
+                    {% set source = source_map.get(feed.url) %}
+                    {% if source and source.last_fetched %}
+                    <span class="feed-last-fetched">Last fetched: {{ source.last_fetched }}</span>
+                    {% else %}
+                    <span class="feed-last-fetched">Never fetched</span>
+                    {% endif %}
+                </div>
+                <button class="btn btn-danger btn-sm" onclick="removeFeed(this)" title="Remove feed">&times;</button>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="add-feed-form">
+            <h3>Add Custom Feed</h3>
+            <div class="form-row">
+                <input type="text" id="new-feed-name" class="form-input" placeholder="Feed Name">
+                <input type="text" id="new-feed-url" class="form-input" placeholder="https://example.com/feed.xml">
+                <button class="btn btn-secondary" onclick="addFeed()">Add</button>
+            </div>
+        </div>
+    </section>
+
+    <div class="settings-actions">
+        <button class="btn btn-primary btn-lg" onclick="saveSettings()">Save Settings</button>
+        <span class="save-status" id="save-status"></span>
+    </div>
+
+    <section class="settings-section">
+        <h2>Feedback</h2>
+        <p class="form-hint" style="margin-bottom:14px;">Found a bug or have an idea? Open an issue or pull request on GitHub.</p>
+        <a href="https://github.com/diog0machad0/EmergingThreats/issues" target="_blank" rel="noopener" class="btn btn-secondary">Open an Issue or PR on GitHub</a>
+    </section>
+
+    <section class="settings-section">
+        <h2>About</h2>
+        <p style="font-size:1rem;font-weight:600;color:var(--text-primary);margin:0 0 4px;">JOES Threat Intelligence</p>
+        <p class="form-hint" style="margin-bottom:14px;">AI-powered threat news analysis platform</p>
+        <a href="https://github.com/diog0machad0/EmergingThreats" target="_blank" rel="noopener" class="btn btn-secondary">View Source Code on GitHub</a>
+    </section>
+
+    <section class="settings-section settings-section-danger">
+        <h2>Danger Zone</h2>
+        <p class="form-hint">Delete articles, summaries, and embeddings. Sources and settings are preserved.</p>
+        <div class="form-group" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <label for="clear-db-period" style="font-size:0.9rem;color:var(--text-secondary);white-space:nowrap;">Delete articles older than:</label>
+            <select id="clear-db-period" class="form-input" style="width:auto;min-width:160px;">
+                <option value="0">All time (clear all)</option>
+                <option value="1">24 hours</option>
+                <option value="7">7 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+            </select>
+        </div>
+        <div class="danger-zone-actions">
+            <button class="btn btn-danger" id="clear-db-btn" onclick="clearDatabase()">Clear Database</button>
+            <span class="save-status" id="clear-db-status"></span>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        loadStats();
+    });
+
+</script>
+{% endblock %}

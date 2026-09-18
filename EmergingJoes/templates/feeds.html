@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+
+{% block title %}Feeds - JOES Threat Intelligence{% endblock %}
+
+{% block content %}
+<div class="feeds-page">
+    <div class="feeds-header">
+        <h1 class="page-title">Ingested Feeds</h1>
+        <p class="feeds-subtitle">Raw articles collected from RSS and Atom sources</p>
+    </div>
+
+    <div class="feeds-toolbar">
+        <select id="feeds-source-filter" class="form-input feeds-filter">
+            <option value="">All sources</option>
+        </select>
+        <span class="feeds-count" id="feeds-count"></span>
+    </div>
+
+    <div class="feeds-table-wrap">
+        <table class="feeds-table" id="feeds-table">
+            <thead>
+                <tr>
+                    <th>Source</th>
+                    <th>Title</th>
+                    <th>Published</th>
+                    <th>Ingested</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="feeds-tbody"></tbody>
+        </table>
+    </div>
+
+    <div class="feeds-empty" id="feeds-empty" style="display:none;">
+        <p>No ingested articles yet. Use <strong>Refresh</strong> on the Feed page to fetch from configured sources.</p>
+    </div>
+
+    <div class="feeds-pagination">
+        <button class="btn btn-secondary btn-sm" id="feeds-prev" onclick="feedsPageChange(-1)" disabled>&#8592; Prev</button>
+        <span id="feeds-page-label"></span>
+        <button class="btn btn-secondary btn-sm" id="feeds-next" onclick="feedsPageChange(1)" disabled>Next &#8594;</button>
+    </div>
+</div>
+
+<!-- Raw content preview modal -->
+<div class="modal-overlay" id="feeds-preview-modal" style="display:none">
+    <div class="modal-dialog feeds-preview-dialog">
+        <h3 class="modal-title" id="feeds-preview-title"></h3>
+        <p class="feeds-preview-meta" id="feeds-preview-meta"></p>
+        <a id="feeds-preview-url" href="#" target="_blank" rel="noopener" class="feeds-preview-link"></a>
+        <pre class="feeds-preview-content" id="feeds-preview-content"></pre>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeFeedsPreview()">Close</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let feedsPage = 1;
+let feedsTotal = 0;
+let feedsLimit = 50;
+let feedsSourceId = '';
+let feedsSearchTimer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadStats();
+    loadFeedsSources();
+    loadIngestedFeeds();
+
+    const searchInput = document.getElementById('search-input');
+    if (searchInput) {
+        searchInput.placeholder = 'Search ingested feeds...';
+        searchInput.addEventListener('input', () => {
+            clearTimeout(feedsSearchTimer);
+            feedsSearchTimer = setTimeout(() => {
+                feedsPage = 1;
+                loadIngestedFeeds();
+            }, 300);
+        });
+    }
+
+    document.getElementById('feeds-source-filter').addEventListener('change', (e) => {
+        feedsSourceId = e.target.value;
+        feedsPage = 1;
+        loadIngestedFeeds();
+    });
+});
+
+async function loadFeedsSources() {
+    try {
+        const res = await fetch('/api/sources');
+        const sources = await res.json();
+        const select = document.getElementById('feeds-source-filter');
+        sources.forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s.id;
+            opt.textContent = s.name;
+            select.appendChild(opt);
+        });
+    } catch (e) {
+        console.error('Failed to load sources:', e);
+    }
+}
+
+async function loadIngestedFeeds() {
+    const tbody = document.getElementById('feeds-tbody');
+    const empty = document.getElementById('feeds-empty');
+    const tableWrap = document.querySelector('.feeds-table-wrap');
+    const search = document.getElementById('search-input')?.value.trim() || '';
+
+    const params = new URLSearchParams({ page: feedsPage, limit: feedsLimit });
+    if (feedsSourceId) params.set('source_id', feedsSourceId);
+    if (search) params.set('search', search);
+
+    try {
+        const res = await fetch('/api/ingested?' + params);
+        const data = await res.json();
+        feedsTotal = data.total;
+        tbody.innerHTML = '';
+
+        if (data.articles.length === 0) {
+            empty.style.display = 'block';
+            tableWrap.style.display = 'none';
+        } else {
+            empty.style.display = 'none';
+            tableWrap.style.display = 'block';
+            data.articles.forEach(a => tbody.appendChild(createFeedRow(a)));
+        }
+
+        updateFeedsPagination();
+        document.getElementById('feeds-count').textContent =
+            `${feedsTotal} article${feedsTotal === 1 ? '' : 's'}`;
+    } catch (e) {
+        console.error('Failed to load ingested feeds:', e);
+    }
+}
+
+function createFeedRow(article) {
+    const tr = document.createElement('tr');
+    tr.className = 'feeds-row';
+    if (article.scrape_status === 'scraped') tr.style.cursor = 'pointer';
+
+    const pub = formatFeedDate(article.published_date);
+    const ing = formatFeedDate(article.fetched_date);
+    const statusClass = {
+        scraped: 'feeds-status-scraped',
+        scrape_failed: 'feeds-status-failed',
+        unscraped: 'feeds-status-pending',
+    }[article.scrape_status] || '';
+
+    const statusLabel = {
+        scraped: 'Scraped',
+        scrape_failed: 'Scrape failed',
+        unscraped: 'Pending',
+    }[article.scrape_status] || article.scrape_status;
+
+    tr.innerHTML = `
+        <td class="feeds-source">${escHtml(article.source_name)}</td>
+        <td class="feeds-title">${escHtml(article.title)}</td>
+        <td class="feeds-date">${escHtml(pub)}</td>
+        <td class="feeds-date">${escHtml(ing)}</td>
+        <td><span class="feeds-status ${statusClass}">${escHtml(statusLabel)}</span></td>
+    `;
+
+    if (article.scrape_status === 'scraped') {
+        tr.onclick = () => showFeedsPreview(article);
+    }
+
+    return tr;
+}
+
+function formatFeedDate(value) {
+    if (!value) return '—';
+    const d = new Date(value);
+    if (isNaN(d)) return value;
+    return d.toLocaleString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+    });
+}
+
+function showFeedsPreview(article) {
+    document.getElementById('feeds-preview-title').textContent = article.title;
+    document.getElementById('feeds-preview-meta').textContent =
+        `${article.source_name} · ${article.content_length || 0} chars scraped`;
+    const link = document.getElementById('feeds-preview-url');
+    link.href = article.url;
+    link.textContent = article.url;
+    document.getElementById('feeds-preview-content').textContent =
+        article.content_preview || '(No content preview available)';
+    document.getElementById('feeds-preview-modal').style.display = 'flex';
+}
+
+function closeFeedsPreview() {
+    document.getElementById('feeds-preview-modal').style.display = 'none';
+}
+
+function feedsPageChange(delta) {
+    const maxPage = Math.max(1, Math.ceil(feedsTotal / feedsLimit));
+    feedsPage = Math.min(maxPage, Math.max(1, feedsPage + delta));
+    loadIngestedFeeds();
+}
+
+function updateFeedsPagination() {
+    const maxPage = Math.max(1, Math.ceil(feedsTotal / feedsLimit));
+    document.getElementById('feeds-page-label').textContent =
+        `Page ${feedsPage} of ${maxPage}`;
+    document.getElementById('feeds-prev').disabled = feedsPage <= 1;
+    document.getElementById('feeds-next').disabled = feedsPage >= maxPage;
+}
+
+function escHtml(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+}
+</script>
+{% endblock %}

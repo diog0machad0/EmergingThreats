@@ -1,0 +1,44 @@
+# Root gitignore — JOES Threat Intelligence
+
+.DS_Store
+*.zip
+emergingJoes-handoff.zip
+
+# Python
+**/venv/
+**/.venv/
+**/__pycache__/
+*.pyc
+**/.requirements-stamp
+
+# Customer data — inventories and exports must never reach the remote
+export-tvm-*.csv
+vendor-system-inventory.xlsx
+*.xlsx
+customer-data/
+
+# Secrets & local data
+**/.env
+**/.env.local
+**/data/config.json
+**/data/*.db
+**/data/*.db-shm
+**/data/*.db-wal
+**/*.db
+
+# Generated advisories. Deny-all then re-allow the template, because generated
+# filenames follow the advisory subject and will not always match a cve-/ti-
+# prefix (e.g. "sap_critical_vulnerabilities_...advisory.md").
+scriba/output/*
+!scriba/output/.gitkeep
+scriba/reports/*
+!scriba/reports/sample_advisory.md
+
+# Optional bulky MISP checkout
+misp/misp-docker/
+misp/setup.log
+
+# IDE
+.idea/
+.vscode/
+*.swp

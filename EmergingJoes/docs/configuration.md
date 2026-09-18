@@ -1,0 +1,235 @@
+# Configuration
+
+JOES Threat Intelligence is configured through `config.json` in the `data/` subdirectory. All settings can also be managed through the **Settings** page in the web UI.
+
+## Configuration File
+
+On first run, `data/config.json` is created with default values:
+
+```json
+{
+  "openai_api_key": "",
+  "openai_model": "gpt-4.1-mini",
+  "anthropic_api_key": "",
+  "anthropic_model": "claude-haiku-4-5-20251001",
+  "llm_provider": "openai",
+  "fetch_interval_minutes": 30,
+  "malpedia_api_key": "",
+  "report_token": "",
+  "feeds": [
+    {
+      "name": "The Hacker News",
+      "url": "https://feeds.feedburner.com/TheHackersNews",
+      "enabled": true
+    }
+  ]
+}
+```
+
+## Configuration Reference
+
+### LLM Provider
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `llm_provider` | string | `"openai"` | Active LLM provider. Either `"openai"` or `"anthropic"`. |
+
+### OpenAI Settings
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `openai_api_key` | string | `""` | Your OpenAI API key. Required for summarization, relevance filtering, embeddings, and intelligence chat. Also required for embeddings when using the Anthropic provider. |
+| `openai_model` | string | `"gpt-4.1-mini"` | OpenAI model used for summarization, relevance checks, and insights. |
+
+#### OpenAI Model Options
+
+| Model | Speed | Cost | Quality | Best For |
+|---|---|---|---|---|
+| `gpt-4.1-mini` | Fast | Low | Good | Daily use, high-volume processing (default) |
+| `gpt-5-mini` | Fast | Low | Very Good | Higher quality summaries with faster inference |
+
+### Anthropic Settings
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `anthropic_api_key` | string | `""` | Your Anthropic API key. Used for summarization and insights when `llm_provider` is `"anthropic"`. |
+| `anthropic_model` | string | `"claude-haiku-4-5-20251001"` | Anthropic model used for summarization and insights. |
+
+#### Anthropic Model Options
+
+| Model | Speed | Cost | Quality | Best For |
+|---|---|---|---|---|
+| `claude-haiku-4-5-20251001` | Fast | Low | Good | Daily use, high-volume processing |
+| `claude-sonnet-4-6` | Medium | Medium | Excellent | Higher quality summaries and insights |
+| `claude-opus-4-6` | Medium | High | Best | Highest quality, complex analysis |
+
+!!! tip "Recommendation"
+    Start with `gpt-4o-mini` (OpenAI) or `claude-haiku-4-5-20251001` (Anthropic) for the best balance of speed and cost. Switch to a larger model if you need higher-quality trend analysis and attack flow generation.
+
+!!! info "Embeddings"
+    The embedding model is fixed at `text-embedding-3-small` (1536 dimensions) and always uses OpenAI, regardless of the active `llm_provider`. An OpenAI API key is required even when using Anthropic for summarization.
+
+### Fetch Settings
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `fetch_interval_minutes` | integer | `30` | How often the background pipeline runs (in minutes). |
+
+The scheduler triggers the full pipeline (fetch, scrape, summarize, embed) at this interval. Set to a higher value to reduce API usage, or lower for near-real-time ingestion.
+
+### Malpedia Integration
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `malpedia_api_key` | string | `""` | API token for Malpedia research library access. |
+
+Malpedia provides curated threat research articles from the security community. When configured, the pipeline fetches the BibTeX bibliography and imports relevant entries.
+
+To get a key:
+
+1. Register at [malpedia.caad.fkie.fraunhofer.de](https://malpedia.caad.fkie.fraunhofer.de/)
+2. Navigate to your profile
+3. Generate an API token
+
+### Email Notifications
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `email_notifications_enabled` | boolean | `false` | Enable email alerts (per-article or digest). |
+| `email_mode` | string | `"per_article"` | Delivery mode: `"per_article"` (immediate) or `"digest"` (aggregated). |
+| `digest_period` | string | `"day"` | Digest frequency when `email_mode="digest"`: `"day"` or `"week"`. Runs at 5:30 PM IST. |
+| `notification_email` | string | `""` | Recipient email address. |
+| `smtp_host` | string | `""` | SMTP server hostname (e.g. `smtp.gmail.com`). |
+| `smtp_port` | integer | `587` | SMTP server port. |
+| `smtp_username` | string | `""` | SMTP login username. |
+| `smtp_password` | string | `""` | SMTP login password or app password. |
+| `smtp_use_tls` | boolean | `true` | Use STARTTLS encryption. |
+
+See [Email Notifications](features/email-notifications.md) for setup guides and common SMTP provider configurations.
+
+### Reporting
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `report_token` | string | `""` | Optional pre-shared token for the `/api/report` endpoint. When set, report submissions must include a matching token. Leave empty to accept reports without authentication (suitable for local/home-network deployments). |
+
+### Feed Management
+
+The `feeds` array contains all RSS/Atom sources:
+
+```json
+{
+  "feeds": [
+    {
+      "name": "Feed Display Name",
+      "url": "https://example.com/feed.xml",
+      "enabled": true
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Display name shown in the UI |
+| `url` | string | RSS or Atom feed URL |
+| `enabled` | boolean | Whether the feed is fetched during pipeline runs |
+
+## Default Feeds
+
+JOES Threat Intelligence ships with 61 pre-configured cybersecurity feeds. A representative sample:
+
+| Feed | URL | Default |
+|---|---|---|
+| The Hacker News | `feeds.feedburner.com/TheHackersNews` | Enabled |
+| BleepingComputer | `bleepingcomputer.com/feed/` | Enabled |
+| Krebs on Security | `krebsonsecurity.com/feed/` | Enabled |
+| SecurityWeek | `feeds.feedburner.com/securityweek` | Enabled |
+| Dark Reading | `darkreading.com/rss.xml` | Enabled |
+| CISA Alerts | `cisa.gov/cybersecurity-advisories/all.xml` | Enabled |
+| Sophos News | `news.sophos.com/en-us/feed/` | Enabled |
+| Infosecurity Magazine | `infosecurity-magazine.com/rss/news/` | Enabled |
+| HackRead | `hackread.com/feed/` | Enabled |
+| SC Media | `scmagazine.com/feed` | Disabled |
+| Cyber Defense Magazine | `cyberdefensemagazine.com/feed/` | Disabled |
+| The Record | `therecord.media/feed/` | Enabled |
+| Schneier on Security | `schneier.com/feed/` | Enabled |
+
+## Adding Custom Feeds
+
+### Via the UI
+
+1. Go to **Settings**
+2. Scroll to the **RSS Feeds** section
+3. Enter a **Name** and **URL** at the bottom
+4. Click **Add Feed**
+5. Click **Save Settings**
+
+### Via `config.json`
+
+Add an entry to the `feeds` array:
+
+```json
+{
+  "feeds": [
+    {
+      "name": "My Custom Feed",
+      "url": "https://example.com/threat-feed.xml",
+      "enabled": true
+    }
+  ]
+}
+```
+
+!!! warning "Feed Format"
+    Only RSS 2.0 and Atom feeds are supported. The feed must return valid XML with standard entry elements (title, link, published date).
+
+## Settings UI
+
+The Settings page provides a graphical interface for all configuration:
+
+- **LLM Provider** — Select between OpenAI and Anthropic
+- **API Keys** — Enter and test OpenAI, Anthropic, and Malpedia keys
+- **Model Selection** — Dropdown for the active provider's model
+- **Fetch Interval** — Slider to adjust pipeline frequency
+- **Email Notifications** — Configure SMTP and test email delivery
+- **Feed Management** — Enable/disable feeds, add/remove custom sources (http/https URLs only)
+- **Refresh Controls** — Trigger manual refresh with lookback period
+- **Clear Database** — Remove articles/summaries older than a selected period (24 h / 7 d / 30 d / 90 d / all time); source list is preserved
+
+The dashboard header also provides direct pipeline controls:
+
+- **Refresh / Since Last Retrieval** — Trigger full or incremental feed refresh
+- **Generate Embeddings** — Embed all summarized articles that don't have a vector yet
+- **Ingest URLs** — Paste article URLs to scrape and summarize without a full feed fetch
+- **Abort** — Stop the running pipeline after the current batch (appears only while a pipeline is active)
+
+!!! info "Screenshot"
+    _A screenshot of the Settings page can be added here._
+
+---
+
+## Environment Variables
+
+All API keys and critical settings can be supplied as environment variables. These override any values stored in `data/config.json`, which is useful for Docker deployments where you don't want secrets baked into the image.
+
+| Variable | Overrides | Description |
+|---|---|---|
+| `OPENAI_API_KEY` | `openai_api_key` | OpenAI API key. Always required for embeddings. |
+| `ANTHROPIC_API_KEY` | `anthropic_api_key` | Anthropic API key. Required when `LLM_PROVIDER=anthropic`. |
+| `LLM_PROVIDER` | `llm_provider` | Active LLM provider: `openai` or `anthropic`. |
+| `OPENAI_MODEL` | `openai_model` | OpenAI model name (e.g. `gpt-4.1-mini`). |
+| `ANTHROPIC_MODEL` | `anthropic_model` | Anthropic model name (e.g. `claude-haiku-4-5-20251001`). |
+| `MALPEDIA_API_KEY` | `malpedia_api_key` | Malpedia research library API token. |
+| `DATA_DIR` | — | Directory for `config.json` and `threatlandscape.db`. |
+| `SMTP_HOST` | `smtp_host` | SMTP server hostname. |
+| `SMTP_PORT` | `smtp_port` | SMTP server port. |
+| `SMTP_USERNAME` | `smtp_username` | SMTP login username. |
+| `SMTP_PASSWORD` | `smtp_password` | SMTP login password or app password. |
+| `NOTIFICATION_EMAIL` | `notification_email` | Recipient email address for article alerts. |
+
+Set these in `docker-compose.yml` under the `environment` key, or pass them on the command line:
+
+```bash
+OPENAI_API_KEY=sk-proj-... ANTHROPIC_API_KEY=sk-ant-... LLM_PROVIDER=anthropic docker compose up
+```

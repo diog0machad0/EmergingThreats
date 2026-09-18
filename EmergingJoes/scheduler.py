@@ -1,0 +1,602 @@
+import logging
+import threading
+
+from apscheduler.schedulers.background import BackgroundScheduler
+
+from config import load_config
+from cost_tracker import CostTracker, cost_tracker
+
+logger = logging.getLogger(__name__)
+
+_scheduler = None
+_refresh_lock = threading.Lock()
+_is_refreshing = False
+_is_embedding_only = False   # True only when running embed-only job
+_is_digesting = False        # True when digest email job is running
+_abort_requested = False     # Set to True to stop pipeline between stages
+
+# Cost confirmation gate
+_cost_estimate = None       # dict: {article_count, estimated_cost, model} or None
+_cost_decision = None       # "approved" | "declined" | None (waiting)
+_cost_event = threading.Event()
+_actual_cost = None          # dict: {article_count, actual_cost, model} or None
+_pipeline_stage = None       # current stage string for status polling
+
+
+def _run_pipeline(lookback_days=1, since_last_fetch=False):
+    """Execute the full ingestion pipeline under an exclusive lock."""
+    global _is_refreshing, _cost_estimate, _cost_decision, _actual_cost, _pipeline_stage
+    global _abort_requested
+
+    if not _refresh_lock.acquire(blocking=False):
+        logger.info("Refresh already in progress, skipping")
+        return
+
+    _is_refreshing = True
+    _abort_requested = False
+    _cost_estimate = None
+    _cost_decision = None
+    _actual_cost = None
+    _pipeline_stage = "fetch"
+    cost_tracker.reset()
+
+    try:
+        from feed_fetcher import fetch_all_feeds
+        from malpedia_fetcher import fetch_malpedia
+        from article_scraper import scrape_unscraped_articles
+        from summarizer import summarize_pending
+        from database import delete_file_url_articles, get_unsummarized_count
+
+        mode = "since last retrieval" if since_last_fetch else f"lookback={lookback_days}d"
+        logger.info(f"Starting fetch pipeline ({mode})...")
+
+        # Clean up any file-based articles (PDF, DOC, etc.) before processing
+        deleted = delete_file_url_articles()
+        if deleted:
+            logger.info(f"Cleaned up {deleted} file-URL articles")
+
+        new_articles = fetch_all_feeds(lookback_days=lookback_days, since_last_fetch=since_last_fetch)
+        logger.info(f"Fetched {new_articles} new articles from RSS feeds")
+
+        if _abort_requested:
+            _pipeline_stage = "aborted"
+            return
+
+        malpedia_new = fetch_malpedia(lookback_days=lookback_days, since_last_fetch=since_last_fetch)
+        logger.info(f"Fetched {malpedia_new} new articles from Malpedia")
+        new_articles += malpedia_new
+
+        # Scrape all pending articles in batches
+        _pipeline_stage = "scrape"
+        total_scraped = 0
+        while not _abort_requested:
+            batch = scrape_unscraped_articles(limit=10)
+            if batch == 0:
+                break
+            total_scraped += batch
+        logger.info(f"Scraped {total_scraped} articles total")
+
+        if _abort_requested:
+            _pipeline_stage = "aborted"
+            return
+
+        # Cost confirmation before summarization
+        to_summarize = get_unsummarized_count()
+        total_summarized = 0
+        summarization_skipped = False
+
+        if to_summarize > 0:
+            from llm_client import has_api_key, get_model_name
+            model = get_model_name()
+
+            if has_api_key():
+                estimated = CostTracker.estimate_summarization_cost(to_summarize, model)
+                _cost_estimate = {
+                    "article_count": to_summarize,
+                    "estimated_cost": round(estimated, 4),
+                    "model": model,
+                }
+                _pipeline_stage = "confirm"
+                _cost_event.clear()
+                _cost_decision = None
+
+                logger.info(f"Awaiting cost confirmation: {to_summarize} articles, ~${estimated:.4f} ({model})")
+
+                # Wait up to 5 minutes for user decision (abort also wakes the event)
+                _cost_event.wait(timeout=300)
+
+                if _abort_requested or _cost_decision == "declined":
+                    summarization_skipped = True
+                    if _abort_requested:
+                        logger.info("Summarization cancelled by abort")
+                    else:
+                        logger.info("Summarization declined by user")
+                elif _cost_decision != "approved":
+                    # Timeout — auto-approve
+                    logger.info("Cost confirmation timed out, auto-approving")
+
+                _cost_estimate = None
+
+        if _abort_requested:
+            _pipeline_stage = "aborted"
+            return
+
+        if not summarization_skipped and to_summarize > 0:
+            _pipeline_stage = "summarize"
+            while not _abort_requested:
+                batch = summarize_pending()
+                if batch == 0:
+                    break
+                total_summarized += batch
+            logger.info(f"Summarized {total_summarized} articles total")
+
+            from llm_client import get_model_name
+            model = get_model_name()
+            actual = cost_tracker.get_session_cost(model)
+            _actual_cost = {
+                "article_count": total_summarized,
+                "actual_cost": round(actual, 4),
+                "model": model,
+            }
+            logger.info(f"Pipeline complete (actual cost: ${actual:.4f})")
+        elif summarization_skipped:
+            logger.info("Pipeline complete (summarization skipped)")
+        else:
+            logger.info("Pipeline complete")
+
+        if _abort_requested:
+            _pipeline_stage = "aborted"
+            return
+
+        # Generate embeddings for summarized articles
+        _pipeline_stage = "embed"
+        from embeddings import embed_pending_articles
+        total_embedded = 0
+        while not _abort_requested:
+            batch = embed_pending_articles(limit=50)
+            if batch == 0:
+                break
+            total_embedded += batch
+        logger.info(f"Generated embeddings for {total_embedded} articles total")
+
+        _pipeline_stage = "done" if not _abort_requested else "aborted"
+    except Exception as e:
+        logger.error(f"Pipeline error: {e}")
+        _pipeline_stage = "error"
+    finally:
+        _is_refreshing = False
+        _refresh_lock.release()
+
+
+def _reschedule_digest(config=None):
+    """Register (or replace) the digest cron job based on the configured period.
+
+    - ``day``  → cron fires every day at 12:00 UTC (17:30 IST)
+    - ``week`` → cron fires every Friday at 12:00 UTC (17:30 IST)
+
+    Safe to call while the scheduler is running; uses ``replace_existing=True``.
+    """
+    if _scheduler is None:
+        return
+    if config is None:
+        config = load_config()
+    period = config.get("digest_period", "day")
+    if period == "week":
+        trigger_kwargs = dict(trigger="cron", day_of_week="fri", hour=12, minute=0, timezone="UTC")
+        label = "every Friday at 17:30 IST"
+    else:
+        trigger_kwargs = dict(trigger="cron", hour=12, minute=0, timezone="UTC")
+        label = "daily at 17:30 IST"
+    _scheduler.add_job(
+        _run_digest,
+        id="digest_job",
+        replace_existing=True,
+        **trigger_kwargs,
+    )
+    logger.info(f"Digest job scheduled: {label}")
+
+
+def reschedule_digest():
+    """Public wrapper — call after saving settings to apply the new digest period."""
+    _reschedule_digest()
+
+
+def start_scheduler(app=None):
+    """Start the APScheduler background job."""
+    global _scheduler
+    if _scheduler is not None:
+        return
+
+    config = load_config()
+    interval = config.get("fetch_interval_minutes", 30)
+
+    _scheduler = BackgroundScheduler(daemon=True)
+    _scheduler.add_job(_run_pipeline, "interval", minutes=interval, id="fetch_pipeline")
+    _reschedule_digest(config)
+    _scheduler.start()
+    logger.info(f"Scheduler started: fetching every {interval} minutes; digest at 17:30 IST")
+
+
+def trigger_manual_refresh(lookback_days=1, since_last_fetch=False):
+    """Spawn a daemon thread to run the pipeline and return immediately."""
+    if _is_refreshing:
+        return False
+    thread = threading.Thread(
+        target=_run_pipeline,
+        kwargs={"lookback_days": lookback_days, "since_last_fetch": since_last_fetch},
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def is_refreshing():
+    return _is_refreshing
+
+
+def get_pipeline_stage():
+    return _pipeline_stage
+
+
+def get_cost_estimate():
+    """Return the pending cost estimate, or None if not waiting."""
+    return _cost_estimate
+
+
+def approve_cost():
+    """Approve the pending cost estimate."""
+    global _cost_decision
+    _cost_decision = "approved"
+    _cost_event.set()
+
+
+def decline_cost():
+    """Decline the pending cost estimate."""
+    global _cost_decision
+    _cost_decision = "declined"
+    _cost_event.set()
+
+
+def get_actual_cost():
+    """Return the actual cost after summarization, or None."""
+    return _actual_cost
+
+
+def dismiss_actual_cost():
+    """Clear the actual cost so the dialog isn't shown again."""
+    global _actual_cost
+    _actual_cost = None
+
+
+def abort_pipeline():
+    """Request the running pipeline or embed job to stop between stages.
+
+    Sets the abort flag and wakes up any cost-confirmation wait so the
+    pipeline exits promptly. Does nothing if nothing is running.
+    """
+    global _abort_requested
+    _abort_requested = True
+    _cost_event.set()  # Wake cost-confirmation wait immediately
+
+
+def is_aborting():
+    """Return True if an abort has been requested."""
+    return _abort_requested
+
+
+def _run_embed_only():
+    """Generate embeddings for all pending articles without fetching feeds."""
+    global _is_embedding_only, _pipeline_stage, _abort_requested  # noqa: PLW0603
+
+    if not _refresh_lock.acquire(blocking=False):
+        logger.info("Another job is running, skipping embed-only")
+        return
+
+    _is_embedding_only = True
+    _abort_requested = False
+    _pipeline_stage = "embed"
+
+    try:
+        from embeddings import embed_pending_articles
+
+        total_embedded = 0
+        while not _abort_requested:
+            batch = embed_pending_articles(limit=50)
+            if batch == 0:
+                break
+            total_embedded += batch
+        logger.info(f"Embed-only job: generated embeddings for {total_embedded} articles")
+        _pipeline_stage = "done" if not _abort_requested else "aborted"
+    except Exception as e:
+        logger.error(f"Embed-only job error: {e}")
+        _pipeline_stage = "error"
+    finally:
+        _is_embedding_only = False
+        _refresh_lock.release()
+
+
+def trigger_embed():
+    """Spawn a background thread to embed pending articles and return immediately.
+
+    Returns:
+        True if the job was started, False if another job is already running.
+    """
+    if _is_refreshing or _is_embedding_only:
+        return False
+    thread = threading.Thread(target=_run_embed_only, daemon=True)
+    thread.start()
+    return True
+
+
+def is_embedding_only():
+    """Return True if an embed-only job is running."""
+    return _is_embedding_only
+
+
+def _run_process_pending(article_ids=None):
+    """Scrape, summarize, and embed pending articles without fetching new feeds.
+
+    Args:
+        article_ids: Optional list of article IDs to restrict processing to.
+            When provided, only those specific articles are processed.
+    """
+    global _is_refreshing, _pipeline_stage, _cost_estimate, _cost_decision, _actual_cost
+    global _abort_requested
+
+    if not _refresh_lock.acquire(blocking=False):
+        logger.info("Another job is running, skipping process-pending")
+        return
+
+    _is_refreshing = True
+    _abort_requested = False
+    _cost_estimate = None
+    _cost_decision = None
+    _actual_cost = None
+    _pipeline_stage = "scrape"
+    cost_tracker.reset()
+
+    try:
+        from article_scraper import scrape_unscraped_articles
+        from summarizer import summarize_pending
+        from embeddings import embed_pending_articles
+        from database import get_unsummarized_count, get_unsummarized_articles
+
+        # Scrape
+        total_scraped = 0
+        while not _abort_requested:
+            batch = scrape_unscraped_articles(limit=10, article_ids=article_ids)
+            if batch == 0:
+                break
+            total_scraped += batch
+        logger.info(f"Scraped {total_scraped} articles")
+
+        if _abort_requested:
+            _pipeline_stage = "aborted"
+            return
+
+        # Cost gate — count only the articles in scope
+        if article_ids:
+            to_summarize = len(get_unsummarized_articles(limit=len(article_ids) + 1, article_ids=article_ids))
+        else:
+            to_summarize = get_unsummarized_count()
+        total_summarized = 0
+        summarization_skipped = False
+
+        if to_summarize > 0:
+            from llm_client import has_api_key, get_model_name
+            model = get_model_name()
+            if has_api_key():
+                estimated = CostTracker.estimate_summarization_cost(to_summarize, model)
+                _cost_estimate = {
+                    "article_count": to_summarize,
+                    "estimated_cost": round(estimated, 4),
+                    "model": model,
+                }
+                _pipeline_stage = "confirm"
+                _cost_event.clear()
+                _cost_decision = None
+                _cost_event.wait(timeout=300)
+
+                if _abort_requested or _cost_decision == "declined":
+                    summarization_skipped = True
+                elif _cost_decision != "approved":
+                    logger.info("Cost confirmation timed out, auto-approving")
+                _cost_estimate = None
+
+        if _abort_requested:
+            _pipeline_stage = "aborted"
+            return
+
+        if not summarization_skipped and to_summarize > 0:
+            _pipeline_stage = "summarize"
+            while not _abort_requested:
+                batch = summarize_pending(article_ids=article_ids)
+                if batch == 0:
+                    break
+                total_summarized += batch
+
+            if total_summarized > 0:
+                from llm_client import get_model_name
+                model = get_model_name()
+                actual = cost_tracker.get_session_cost(model)
+                _actual_cost = {
+                    "article_count": total_summarized,
+                    "actual_cost": round(actual, 4),
+                    "model": model,
+                }
+
+        if _abort_requested:
+            _pipeline_stage = "aborted"
+            return
+
+        _pipeline_stage = "embed"
+        while not _abort_requested:
+            batch = embed_pending_articles(limit=50, article_ids=article_ids)
+            if batch == 0:
+                break
+
+        _pipeline_stage = "done" if not _abort_requested else "aborted"
+    except Exception as e:
+        logger.error(f"Process-pending error: {e}")
+        _pipeline_stage = "error"
+    finally:
+        _is_refreshing = False
+        _refresh_lock.release()
+
+
+def trigger_process_pending(article_ids=None):
+    """Scrape, summarize, and embed pending articles without fetching new feeds.
+
+    Args:
+        article_ids: Optional list of article IDs to restrict processing to.
+            When provided, only those specific articles are processed.
+
+    Returns:
+        True if the job was started, False if another job is already running.
+    """
+    if _is_refreshing or _is_embedding_only:
+        return False
+    thread = threading.Thread(target=_run_process_pending, kwargs={"article_ids": article_ids}, daemon=True)
+    thread.start()
+    return True
+
+
+def _run_digest(force=False):
+    """Cluster articles since last digest, synthesize stories, and send digest email.
+
+    Args:
+        force: If True, skip the period-gate check (used for manual "Send Now").
+    """
+    global _is_digesting
+
+    if _is_digesting:
+        logger.info("Digest already running, skipping")
+        return
+
+    config = load_config()
+    if not config.get("email_notifications_enabled"):
+        logger.info("Email notifications disabled, skipping digest")
+        return
+    if config.get("email_mode", "per_article") != "digest":
+        logger.info("Digest mode not enabled, skipping")
+        return
+
+    _is_digesting = True
+    try:
+        from datetime import datetime, timedelta
+        from database import get_last_digest_sent_at, get_articles_with_embeddings_since, log_digest_sent
+        from embeddings import cluster_articles_by_similarity
+        from summarizer import synthesize_digest_story
+        from notifier import send_digest_email
+
+        digest_period = config.get("digest_period", "day")
+        period_days = 7 if digest_period == "week" else 1
+
+        # Period gate: for scheduled runs, skip if not enough time has elapsed
+        last_sent = get_last_digest_sent_at()
+        if not force and last_sent:
+            last_sent_dt = datetime.fromisoformat(last_sent)
+            elapsed = datetime.utcnow() - last_sent_dt
+            if elapsed.total_seconds() < (period_days * 86400 - 3600):  # 1h grace
+                logger.info(f"Digest: last sent {elapsed} ago, period={digest_period}, skipping")
+                return
+
+        # Determine window:
+        # - If a prior auto-digest exists: use that timestamp
+        # - Manual send with no prior digest: use epoch (pick up all DB articles)
+        # - Scheduled send with no prior digest: use configured period as fallback
+        if last_sent:
+            since_dt = last_sent
+            since_label = last_sent[:10]
+        elif force:
+            since_dt = "1970-01-01T00:00:00"
+            since_label = "all time"
+        else:
+            since_dt = (datetime.utcnow() - timedelta(days=period_days)).isoformat()
+            since_label = (datetime.utcnow() - timedelta(days=period_days)).strftime("%Y-%m-%d")
+
+        today_label = datetime.utcnow().strftime("%Y-%m-%d")
+        period_label = f"{since_label} to {today_label}"
+
+        logger.info(f"Running digest: articles since {since_dt}")
+        articles = get_articles_with_embeddings_since(since_dt)
+
+        if not articles:
+            logger.info("Digest: no new articles since last digest, skipping email")
+            return
+
+        logger.info(f"Digest: clustering {len(articles)} articles")
+        clusters = cluster_articles_by_similarity(articles, threshold=0.82)
+        logger.info(f"Digest: {len(clusters)} story clusters")
+
+        stories = []
+        for cluster in clusters:
+            if len(cluster) == 1:
+                # Singleton: assemble from existing summary without extra LLM call
+                art = cluster[0]
+                import re as _re
+                summary = art.get("summary_text") or ""
+                exec_match = _re.search(r"# Executive Summary\s*\n([\s\S]*?)(?=\n#|\Z)", summary, _re.IGNORECASE)
+                exec_sum = exec_match.group(1).strip() if exec_match else ""
+                n_match = _re.search(r"# Novelty[^\n]*\n([\s\S]*?)(?=\n#|\Z)", summary, _re.IGNORECASE)
+                novelty = n_match.group(1).strip() if n_match else ""
+                d_match = _re.search(r"# Details\s*\n([\s\S]*?)(?=\n#|\Z)", summary, _re.IGNORECASE)
+                details = [
+                    line.lstrip("- ").strip()
+                    for line in (d_match.group(1).strip().splitlines() if d_match else [])
+                    if line.strip() and not line.lstrip("- ").strip().startswith("#")
+                ]
+                m_match = _re.search(r"# Mitigations\s*\n([\s\S]*?)(?=\n#|\Z)", summary, _re.IGNORECASE)
+                mitigations = [
+                    line.lstrip("- ").strip()
+                    for line in (m_match.group(1).strip().splitlines() if m_match else [])
+                    if line.strip() and not line.lstrip("- ").strip().startswith("#")
+                ]
+                stories.append({
+                    "story_title": art.get("title", "Security Story"),
+                    "executive_summary": f"{art.get('source_name', 'A source')} reported: {exec_sum}",
+                    "novelty": novelty,
+                    "details": details,
+                    "mitigations": mitigations,
+                    "source_urls": [art.get("url", "")],
+                })
+            else:
+                story = synthesize_digest_story(cluster)
+                stories.append(story)
+
+        all_article_ids = [a["id"] for a in articles]
+        ok, err = send_digest_email(stories, period_label)
+        if ok:
+            if not force:
+                log_digest_sent(datetime.utcnow().isoformat(), all_article_ids, len(stories))
+            else:
+                logger.info("Digest sent manually — last_digest_sent_at not updated")
+        else:
+            logger.error(f"Digest send failed: {err}")
+
+    except Exception as e:
+        logger.error(f"Digest job error: {e}")
+    finally:
+        _is_digesting = False
+
+
+def trigger_send_digest():
+    """Spawn a background thread to run the digest job immediately (forced).
+
+    The period-gate check is bypassed so the digest is always sent regardless
+    of when the last one was sent.
+
+    Returns:
+        True if the job was started, False if already running.
+    """
+    global _is_digesting
+    if _is_refreshing or _is_digesting:
+        return False
+    thread = threading.Thread(target=_run_digest, kwargs={"force": True}, daemon=True)
+    thread.start()
+    return True
+
+
+def is_digesting():
+    """Return True if a digest job is currently running."""
+    return _is_digesting

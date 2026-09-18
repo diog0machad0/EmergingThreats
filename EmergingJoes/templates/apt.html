@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% block title %}APT - JOES Threat Intelligence{% endblock %}
+
+{% block content %}
+<div class="apt-page">
+    <div class="apt-header">
+        <h1 class="page-title">APT Groups</h1>
+        <p class="apt-subtitle">Tracked threat actors from summarized intelligence — aliases consolidated to canonical MITRE groups</p>
+    </div>
+
+    <div class="apt-toolbar">
+        <span class="apt-count" id="apt-count"></span>
+        <span class="apt-misp-status" id="apt-misp-status"></span>
+        <button class="btn btn-secondary btn-sm" id="apt-reprocess-btn" onclick="reprocessAptIocs()" title="Extract IOCs from APT articles and push to MISP">
+            Process pending IOC exports
+        </button>
+        <span class="save-status" id="apt-reprocess-status"></span>
+    </div>
+
+    <div class="apt-grid" id="apt-grid"></div>
+
+    <div class="apt-empty" id="apt-empty" style="display:none;">
+        <div class="empty-icon">&#127919;</div>
+        <h2>No APT groups tracked yet</h2>
+        <p>APT names appear when articles are summarized with threat-actor tags (e.g. apt29, lazarus-group, cozy-bear).</p>
+    </div>
+</div>
+
+<div class="apt-modal-overlay" id="apt-modal-overlay" style="display:none;">
+    <div class="apt-modal" role="dialog">
+        <div class="apt-modal-header">
+            <h2 id="apt-modal-title">APT Group</h2>
+            <button class="apt-modal-close" onclick="closeAptModal()">&times;</button>
+        </div>
+        <div class="apt-modal-body" id="apt-modal-body"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let aptSearchTimer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadStats();
+    loadAptGroups();
+    loadMispStatus();
+
+    const searchInput = document.getElementById('search-input');
+    if (searchInput) {
+        searchInput.placeholder = 'Search APT groups...';
+        searchInput.addEventListener('input', () => {
+            clearTimeout(aptSearchTimer);
+            aptSearchTimer = setTimeout(loadAptGroups, 300);
+        });
+    }
+
+    document.getElementById('apt-modal-overlay').addEventListener('click', (e) => {
+        if (e.target.id === 'apt-modal-overlay') closeAptModal();
+    });
+});
+
+async function loadMispStatus() {
+    const el = document.getElementById('apt-misp-status');
+    try {
+        const res = await fetch('/api/misp/status');
+        const data = await res.json();
+        el.textContent = data.connected ? `MISP: ${data.message}` : `MISP: ${data.message}`;
+        el.className = 'apt-misp-status ' + (data.connected ? 'misp-ok' : 'misp-off');
+    } catch (e) {
+        el.textContent = 'MISP: status unavailable';
+        el.className = 'apt-misp-status misp-off';
+    }
+}
+
+async function loadAptGroups() {
+    const grid = document.getElementById('apt-grid');
+    const empty = document.getElementById('apt-empty');
+    const search = document.getElementById('search-input')?.value.trim() || '';
+    const params = search ? '?search=' + encodeURIComponent(search) : '';
+
+    try {
+        const res = await fetch('/api/apt-groups' + params);
+        const data = await res.json();
+        grid.innerHTML = '';
+
+        document.getElementById('apt-count').textContent =
+            `${data.total} APT group${data.total === 1 ? '' : 's'} tracked`;
+
+        if (!data.groups || data.groups.length === 0) {
+            empty.style.display = 'block';
+        } else {
+            empty.style.display = 'none';
+            data.groups.forEach(g => grid.appendChild(createAptCard(g)));
+        }
+    } catch (e) {
+        console.error('Failed to load APT groups:', e);
+    }
+}
+
+function createAptCard(group) {
+    const card = document.createElement('article');
+    card.className = 'apt-card';
+    card.onclick = () => openAptModal(group.canonical_tag);
+
+    const aliases = (group.aliases || []).slice(0, 4);
+    const matched = (group.matched_tags || []).filter(t => t !== group.canonical_tag).slice(0, 3);
+
+    card.innerHTML = `
+        <div class="apt-card-top">
+            <h3 class="apt-card-name">${escHtml(group.display_name)}</h3>
+            <span class="apt-article-badge">${group.article_count} article${group.article_count === 1 ? '' : 's'}</span>
+        </div>
+        ${aliases.length ? `
+            <div class="apt-alias-row">
+                <span class="apt-alias-label">Also known as</span>
+                <div class="apt-alias-tags">
+                    ${aliases.map(a => `<span class="apt-alias-tag">${escHtml(a)}</span>`).join('')}
+                    ${(group.aliases || []).length > 4 ? '<span class="apt-alias-more">+' + ((group.aliases.length) - 4) + '</span>' : ''}
+                </div>
+            </div>
+        ` : ''}
+        ${matched.length ? `
+            <p class="apt-matched-tags">Tags seen: ${matched.map(t => escHtml(t)).join(', ')}</p>
+        ` : ''}
+        <div class="apt-card-footer">
+            <span class="apt-misp-badge ${group.misp_export_count ? 'has-exports' : ''}">
+                ${group.misp_export_count} MISP export${group.misp_export_count === 1 ? '' : 's'}
+            </span>
+        </div>
+    `;
+    return card;
+}
+
+async function openAptModal(canonicalTag) {
+    const overlay = document.getElementById('apt-modal-overlay');
+    const body = document.getElementById('apt-modal-body');
+    overlay.style.display = 'flex';
+    body.innerHTML = '<p class="apt-modal-loading">Loading...</p>';
+
+    try {
+        const res = await fetch('/api/apt-groups/' + encodeURIComponent(canonicalTag));
+        if (!res.ok) throw new Error('Not found');
+        const g = await res.json();
+        document.getElementById('apt-modal-title').textContent = g.display_name;
+
+        const aliasHtml = (g.aliases || []).length
+            ? `<div class="apt-modal-aliases">${g.aliases.map(a => `<span class="apt-alias-tag">${escHtml(a)}</span>`).join('')}</div>`
+            : '';
+
+        const articlesHtml = (g.articles || []).map(a => `
+            <div class="apt-modal-article">
+                <a href="${escHtml(a.url)}" target="_blank" rel="noopener">${escHtml(a.title)}</a>
+                <span class="apt-modal-article-meta">${escHtml(a.source_name || '')}</span>
+                <a href="/article/${a.article_id}" class="btn btn-secondary btn-sm">View</a>
+            </div>
+        `).join('') || '<p class="apt-modal-empty">No articles</p>';
+
+        const exportsHtml = (g.misp_exports || []).map(e => `
+            <div class="apt-modal-export">
+                <strong>${e.ioc_count} IOC(s)</strong>
+                <span>${escHtml(e.status)}</span>
+                ${e.campaign ? `<span>Campaign: ${escHtml(e.campaign)}</span>` : ''}
+                ${e.misp_event_id ? `<span>Event #${e.misp_event_id}</span>` : ''}
+                <a href="/article/${e.article_id}">${escHtml(e.title)}</a>
+            </div>
+        `).join('') || '<p class="apt-modal-empty">No MISP exports yet</p>';
+
+        body.innerHTML = `
+            <p class="apt-modal-canonical">Canonical tag: <code>${escHtml(g.canonical_tag)}</code></p>
+            ${aliasHtml}
+            <h4>Related articles (${g.article_count})</h4>
+            <div class="apt-modal-articles">${articlesHtml}</div>
+            <h4>MISP IOC exports (${g.misp_export_count})</h4>
+            <div class="apt-modal-exports">${exportsHtml}</div>
+        `;
+    } catch (e) {
+        body.innerHTML = '<p class="apt-modal-error">Failed to load APT details.</p>';
+    }
+}
+
+function closeAptModal() {
+    document.getElementById('apt-modal-overlay').style.display = 'none';
+}
+
+async function reprocessAptIocs() {
+    const btn = document.getElementById('apt-reprocess-btn');
+    const status = document.getElementById('apt-reprocess-status');
+    btn.disabled = true;
+    status.textContent = 'Processing...';
+
+    try {
+        const res = await fetch('/api/apt/reprocess-iocs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ limit: 10 }),
+        });
+        const data = await res.json();
+        status.textContent = `Processed ${data.processed || 0}, exported ${data.exported || 0}`;
+        status.style.color = 'var(--accent-green)';
+        loadAptGroups();
+        loadMispStatus();
+    } catch (e) {
+        status.textContent = 'Failed';
+        status.style.color = 'var(--accent-red)';
+    } finally {
+        btn.disabled = false;
+        setTimeout(() => { status.textContent = ''; }, 6000);
+    }
+}
+
+function escHtml(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+}
+</script>
+{% endblock %}

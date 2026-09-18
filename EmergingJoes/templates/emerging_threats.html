@@ -1,0 +1,1076 @@
+{% extends "base.html" %}
+
+{% block title %}Emerging Threats - JOES Threat Intelligence{% endblock %}
+
+{% block content %}
+<div class="emerging-threats-page">
+    <div class="emerging-threats-header">
+        <h1 class="page-title">Emerging Threats</h1>
+        <p class="emerging-threats-subtitle">Threat intelligence mapped to your customer footprint</p>
+    </div>
+
+    <div class="threat-tabs">
+        <button class="threat-tab active" data-tab="customer">Threat Intelligence</button>
+        <button class="threat-tab" data-tab="vulnerabilities">Vulnerabilities</button>
+        <button class="threat-tab" data-tab="advisories">Advisories</button>
+    </div>
+
+    <div class="threat-tab-panel" id="tab-customer">
+        <div class="threat-toolbar">
+            <select id="threat-customer-filter" class="form-input threat-filter">
+                <option value="">All customers</option>
+            </select>
+            <select id="threat-triage-filter" class="form-input threat-filter" title="Analyst queue filter">
+                <option value="pending" selected>Queue (untriaged)</option>
+                <option value="triaged">Triaged</option>
+                <option value="all">All</option>
+            </select>
+            <span class="threat-count" id="threat-count"></span>
+            <button class="btn btn-secondary btn-sm" id="threat-analyze-btn" onclick="analyzeMissingThreats()" title="Run customer threat analysis on summarized articles not yet checked">
+                Analyze pending articles
+            </button>
+            <span class="save-status" id="threat-analyze-status"></span>
+        </div>
+
+        <div class="threat-list" id="threat-list"></div>
+
+        <div class="threat-empty" id="threat-empty" style="display:none;">
+            <div class="empty-icon">&#9888;</div>
+            <h2 id="threat-empty-title">Queue is clear</h2>
+            <p id="threat-empty-body">No untriaged threat intelligence matches. New feed hits appear here until marked Triaged.</p>
+            <p id="threat-empty-api-hint" style="display:none;">
+                No LLM API key configured — add one in <a href="/settings">Settings</a>, then summarize articles or click <strong>Analyze pending articles</strong>.
+            </p>
+        </div>
+
+        <div class="threat-pagination">
+            <button class="btn btn-secondary btn-sm" id="threat-prev" onclick="threatPageChange(-1)" disabled>&#8592; Prev</button>
+            <span id="threat-page-label"></span>
+            <button class="btn btn-secondary btn-sm" id="threat-next" onclick="threatPageChange(1)" disabled>Next &#8594;</button>
+        </div>
+    </div>
+
+    <div class="threat-tab-panel" id="tab-vulnerabilities" style="display:none;">
+        <div class="threat-toolbar">
+            <select id="vuln-customer-filter" class="form-input threat-filter">
+                <option value="">All customers</option>
+            </select>
+            <select id="vuln-triage-filter" class="form-input threat-filter" title="Analyst queue filter">
+                <option value="pending" selected>Queue (untriaged)</option>
+                <option value="triaged">Triaged</option>
+                <option value="all">All</option>
+            </select>
+            <span class="threat-count" id="vuln-count"></span>
+            <button class="btn btn-secondary btn-sm" id="vuln-analyze-btn" onclick="analyzeMissingVulnerabilities()" title="Run CVE + tech-stack matching on summarized articles not yet checked">
+                Analyze pending articles
+            </button>
+            <span class="save-status" id="vuln-analyze-status"></span>
+        </div>
+
+        <div class="threat-list" id="vuln-list"></div>
+
+        <div class="threat-empty" id="vuln-empty" style="display:none;">
+            <div class="empty-icon">&#128274;</div>
+            <h2 id="vuln-empty-title">Queue is clear</h2>
+            <p id="vuln-empty-body">No untriaged vulnerability matches. CVE + tech-stack hits appear here until marked Triaged.</p>
+            <p id="vuln-empty-api-hint" style="display:none;">
+                Advisory generation requires an API key in <a href="/settings">Settings</a>.
+            </p>
+        </div>
+
+        <div class="threat-pagination">
+            <button class="btn btn-secondary btn-sm" id="vuln-prev" onclick="vulnPageChange(-1)" disabled>&#8592; Prev</button>
+            <span id="vuln-page-label"></span>
+            <button class="btn btn-secondary btn-sm" id="vuln-next" onclick="vulnPageChange(1)" disabled>Next &#8594;</button>
+        </div>
+    </div>
+
+    <div class="threat-tab-panel" id="tab-advisories" style="display:none;">
+        <div class="advisory-subtabs">
+            <button class="advisory-subtab active" data-adv-kind="all" onclick="switchAdvisoryKind('all')">All advisories</button>
+            <button class="advisory-subtab" data-adv-kind="vulnerability" onclick="switchAdvisoryKind('vulnerability')">Vulnerability advisories</button>
+        </div>
+
+        <div class="threat-toolbar">
+            <input type="search" id="advisory-search" class="form-input threat-filter advisory-search" placeholder="Search CVE, title, technology…">
+            <span class="threat-count" id="advisory-count"></span>
+        </div>
+
+        <div class="threat-list" id="advisory-list"></div>
+
+        <div class="threat-empty" id="advisory-empty" style="display:none;">
+            <div class="empty-icon">&#128196;</div>
+            <h2>No advisories yet</h2>
+            <p>Create one from Threat Intelligence or Vulnerabilities. The database tracks that an advisory was made (e.g. for a CVE or article) — full report content lives in Scriba PDFs.</p>
+        </div>
+
+        <div class="threat-pagination">
+            <button class="btn btn-secondary btn-sm" id="advisory-prev" onclick="advisoryPageChange(-1)" disabled>&#8592; Prev</button>
+            <span id="advisory-page-label"></span>
+            <button class="btn btn-secondary btn-sm" id="advisory-next" onclick="advisoryPageChange(1)" disabled>Next &#8594;</button>
+        </div>
+    </div>
+</div>
+
+<div class="vuln-modal-overlay" id="vuln-modal-overlay" style="display:none;">
+    <div class="vuln-modal" role="dialog" aria-labelledby="vuln-modal-title">
+        <div class="vuln-modal-header">
+            <h2 id="vuln-modal-title">Vulnerability details</h2>
+            <button class="vuln-modal-close" onclick="closeVulnModal()" aria-label="Close">&times;</button>
+        </div>
+        <div class="vuln-modal-body" id="vuln-modal-body"></div>
+    </div>
+</div>
+
+<div class="vuln-modal-overlay" id="ti-modal-overlay" style="display:none;">
+    <div class="vuln-modal" role="dialog" aria-labelledby="ti-modal-title">
+        <div class="vuln-modal-header">
+            <h2 id="ti-modal-title">Threat intelligence details</h2>
+            <button class="vuln-modal-close" onclick="closeTiModal()" aria-label="Close">&times;</button>
+        </div>
+        <div class="vuln-modal-body" id="ti-modal-body"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const DIMENSION_LABELS = {
+    company: 'Company',
+    country: 'Country',
+    business: 'Business',
+    affiliate: 'Affiliate',
+    tech_stack: 'Tech stack',
+};
+
+let activeTab = 'customer';
+let threatPage = 1;
+let threatTotal = 0;
+let threatLimit = 20;
+let threatCustomerId = '';
+let threatTriageStatus = 'pending';
+
+let vulnPage = 1;
+let vulnTotal = 0;
+let vulnLimit = 20;
+let vulnCustomerId = '';
+let vulnTriageStatus = 'pending';
+
+let advisoryPage = 1;
+let advisoryTotal = 0;
+let advisoryLimit = 20;
+let advisoryKind = 'all';
+let advisorySearch = '';
+let advisorySearchTimer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadStats();
+    loadThreatCustomers();
+    loadEmergingThreats();
+    checkApiKeyHint();
+
+    document.getElementById('threat-customer-filter').addEventListener('change', (e) => {
+        threatCustomerId = e.target.value;
+        threatPage = 1;
+        loadEmergingThreats();
+    });
+
+    document.getElementById('threat-triage-filter').addEventListener('change', (e) => {
+        threatTriageStatus = e.target.value || 'pending';
+        threatPage = 1;
+        loadEmergingThreats();
+    });
+
+    document.getElementById('vuln-customer-filter').addEventListener('change', (e) => {
+        vulnCustomerId = e.target.value;
+        vulnPage = 1;
+        loadVulnerabilities();
+    });
+
+    document.getElementById('vuln-triage-filter').addEventListener('change', (e) => {
+        vulnTriageStatus = e.target.value || 'pending';
+        vulnPage = 1;
+        loadVulnerabilities();
+    });
+
+    document.getElementById('advisory-search').addEventListener('input', (e) => {
+        clearTimeout(advisorySearchTimer);
+        advisorySearchTimer = setTimeout(() => {
+            advisorySearch = e.target.value.trim();
+            advisoryPage = 1;
+            loadAdvisories();
+        }, 280);
+    });
+
+    document.querySelectorAll('.threat-tab').forEach(tab => {
+        tab.addEventListener('click', () => switchThreatTab(tab.dataset.tab));
+    });
+
+    document.getElementById('vuln-modal-overlay').addEventListener('click', (e) => {
+        if (e.target.id === 'vuln-modal-overlay') closeVulnModal();
+    });
+    document.getElementById('ti-modal-overlay').addEventListener('click', (e) => {
+        if (e.target.id === 'ti-modal-overlay') closeTiModal();
+    });
+});
+
+function switchThreatTab(tab) {
+    activeTab = tab;
+    document.querySelectorAll('.threat-tab').forEach(el => {
+        el.classList.toggle('active', el.dataset.tab === tab);
+    });
+    document.getElementById('tab-customer').style.display = tab === 'customer' ? '' : 'none';
+    document.getElementById('tab-vulnerabilities').style.display = tab === 'vulnerabilities' ? '' : 'none';
+    document.getElementById('tab-advisories').style.display = tab === 'advisories' ? '' : 'none';
+    if (tab === 'vulnerabilities' && document.getElementById('vuln-customer-filter').options.length <= 1) {
+        loadVulnCustomers();
+    }
+    if (tab === 'vulnerabilities') {
+        loadVulnerabilities();
+    }
+    if (tab === 'advisories') {
+        loadAdvisories();
+    }
+}
+
+function switchAdvisoryKind(kind) {
+    advisoryKind = kind;
+    advisoryPage = 1;
+    document.querySelectorAll('.advisory-subtab').forEach(el => {
+        el.classList.toggle('active', el.dataset.advKind === kind);
+    });
+    loadAdvisories();
+}
+
+async function checkApiKeyHint() {
+    try {
+        const res = await fetch('/api/stats');
+        const stats = await res.json();
+        if (!stats.has_api_key) {
+            document.getElementById('threat-empty-api-hint').style.display = 'block';
+            document.getElementById('vuln-empty-api-hint').style.display = 'block';
+        }
+    } catch (e) {}
+}
+
+async function loadThreatCustomers() {
+    try {
+        const res = await fetch('/api/customers');
+        const customers = await res.json();
+        const select = document.getElementById('threat-customer-filter');
+        customers.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.name;
+            select.appendChild(opt);
+        });
+    } catch (e) {
+        console.error('Failed to load customers:', e);
+    }
+}
+
+async function loadVulnCustomers() {
+    const select = document.getElementById('vuln-customer-filter');
+    if (select.options.length > 1) return;
+    try {
+        const res = await fetch('/api/customers');
+        const customers = await res.json();
+        customers.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.name;
+            select.appendChild(opt);
+        });
+    } catch (e) {
+        console.error('Failed to load customers:', e);
+    }
+}
+
+async function loadEmergingThreats() {
+    const list = document.getElementById('threat-list');
+    const empty = document.getElementById('threat-empty');
+    const params = new URLSearchParams({
+        page: threatPage,
+        limit: threatLimit,
+        triage_status: threatTriageStatus,
+    });
+    if (threatCustomerId) params.set('customer_id', threatCustomerId);
+
+    try {
+        const res = await fetch('/api/emerging-threats?' + params);
+        const data = await res.json();
+        threatTotal = data.total;
+        list.innerHTML = '';
+
+        const queueLabel = threatTriageStatus === 'pending'
+            ? 'in queue'
+            : (threatTriageStatus === 'triaged' ? 'triaged' : 'total');
+        document.getElementById('threat-count').textContent =
+            `${threatTotal} ${queueLabel}`;
+
+        if (!data.threats || data.threats.length === 0) {
+            empty.style.display = 'block';
+            document.getElementById('threat-empty-title').textContent =
+                threatTriageStatus === 'pending' ? 'Queue is clear' : 'No matches';
+            document.getElementById('threat-empty-body').textContent =
+                threatTriageStatus === 'pending'
+                    ? 'No untriaged threat intelligence matches. New feed hits appear here until marked Triaged.'
+                    : (threatTriageStatus === 'triaged'
+                        ? 'No triaged items yet.'
+                        : 'Customer footprint matching runs automatically when articles are summarized.');
+        } else {
+            empty.style.display = 'none';
+            data.threats.forEach(t => list.appendChild(createThreatCard(t)));
+        }
+        updateThreatPagination();
+    } catch (e) {
+        console.error('Failed to load emerging threats:', e);
+    }
+}
+
+async function loadVulnerabilities() {
+    const list = document.getElementById('vuln-list');
+    const empty = document.getElementById('vuln-empty');
+    const params = new URLSearchParams({
+        page: vulnPage,
+        limit: vulnLimit,
+        triage_status: vulnTriageStatus,
+    });
+    if (vulnCustomerId) params.set('customer_id', vulnCustomerId);
+
+    try {
+        const res = await fetch('/api/vulnerabilities?' + params);
+        const data = await res.json();
+        vulnTotal = data.total;
+        list.innerHTML = '';
+
+        const queueLabel = vulnTriageStatus === 'pending'
+            ? 'in queue'
+            : (vulnTriageStatus === 'triaged' ? 'triaged' : 'total');
+        document.getElementById('vuln-count').textContent =
+            `${vulnTotal} ${queueLabel}`;
+
+        if (!data.threats || data.threats.length === 0) {
+            empty.style.display = 'block';
+            document.getElementById('vuln-empty-title').textContent =
+                vulnTriageStatus === 'pending' ? 'Queue is clear' : 'No matches';
+            document.getElementById('vuln-empty-body').textContent =
+                vulnTriageStatus === 'pending'
+                    ? 'No untriaged vulnerability matches. CVE + tech-stack hits appear here until marked Triaged.'
+                    : (vulnTriageStatus === 'triaged'
+                        ? 'No triaged items yet.'
+                        : 'Articles must mention a named CVE and a technology from a customer\'s stack.');
+        } else {
+            empty.style.display = 'none';
+            data.threats.forEach(t => list.appendChild(createVulnCard(t)));
+        }
+        updateVulnPagination();
+    } catch (e) {
+        console.error('Failed to load vulnerabilities:', e);
+    }
+}
+
+function triageBadge(status) {
+    const s = status === 'triaged' ? 'triaged' : 'pending';
+    const label = s === 'triaged' ? 'Triaged' : 'In queue';
+    return `<span class="triage-status-badge triage-${s}">${label}</span>`;
+}
+
+function triageActionButton(kind, articleId, status) {
+    if (status === 'triaged') {
+        return `<button class="btn btn-secondary btn-sm" onclick="setTriageStatus('${kind}', ${articleId}, 'pending')" title="Return to analyst queue">Restore to queue</button>`;
+    }
+    return `<button class="btn btn-secondary btn-sm triage-btn" onclick="setTriageStatus('${kind}', ${articleId}, 'triaged')" title="Mark as reviewed and remove from queue">Mark as Triaged</button>`;
+}
+
+function createThreatCard(item) {
+    const card = document.createElement('article');
+    card.className = 'threat-card';
+    card.dataset.articleId = item.article_id;
+
+    const date = item.published_date || item.fetched_date || item.analyzed_date;
+    const dateStr = formatDate(date);
+    const status = item.triage_status || 'pending';
+    const advisoryBadge = item.has_advisory
+        ? '<span class="advisory-exists-badge" title="An advisory was already created for this article">Advisory tracked</span>'
+        : '';
+
+    const hitsHtml = (item.hits || []).map(hit => `
+        <div class="threat-hit">
+            <div class="threat-hit-header">
+                <span class="threat-customer-name">${escHtml(hit.customer_name)}</span>
+                <div class="threat-dimension-tags">
+                    ${(hit.match_dimensions || []).map(d =>
+                        `<span class="threat-dimension-tag">${escHtml(DIMENSION_LABELS[d] || d)}</span>`
+                    ).join('')}
+                </div>
+            </div>
+            ${hit.match_evidence ? `<p class="threat-evidence"><strong>Why it matches:</strong> ${escHtml(hit.match_evidence)}</p>` : ''}
+            ${(hit.matched_tech && hit.matched_tech.length) ? `<p class="threat-matched-tech"><strong>Matched tech:</strong> ${hit.matched_tech.map(t => escHtml(t)).join(', ')}</p>` : ''}
+            ${(hit.matched_affiliates && hit.matched_affiliates.length) ? `<p class="threat-matched-aff"><strong>Matched affiliates:</strong> ${hit.matched_affiliates.map(a => escHtml(a)).join(', ')}</p>` : ''}
+            ${hit.distribution_outlook ? `<p class="threat-outlook"><strong>Adversary movement:</strong> ${escHtml(hit.distribution_outlook)}</p>` : ''}
+        </div>
+    `).join('');
+
+    card.innerHTML = `
+        <div class="threat-card-top">
+            <div>
+                <span class="source-badge">${escHtml(item.source_name || 'Unknown source')}</span>
+                <span class="article-date">${escHtml(dateStr)}</span>
+                ${triageBadge(status)}
+                ${advisoryBadge}
+            </div>
+            <div class="threat-card-actions">
+                <button class="btn btn-primary btn-sm" onclick="openTiModal(${item.article_id})">Open &amp; create advisory</button>
+                ${triageActionButton('ti', item.article_id, status)}
+            </div>
+        </div>
+        <h3 class="threat-article-title">
+            <a href="${escHtml(item.url)}" target="_blank" rel="noopener">${escHtml(item.title)}</a>
+        </h3>
+        <div class="threat-hits">${hitsHtml}</div>
+    `;
+    return card;
+}
+
+function createVulnCard(item) {
+    const card = document.createElement('article');
+    card.className = 'threat-card vuln-card';
+    card.dataset.articleId = item.article_id;
+
+    const date = item.published_date || item.fetched_date || item.analyzed_date;
+    const dateStr = formatDate(date);
+    const status = item.triage_status || 'pending';
+    const advisoryBadge = item.has_advisory
+        ? '<span class="advisory-exists-badge" title="An advisory was already created for a CVE on this article">Advisory tracked</span>'
+        : '';
+
+    const hitsHtml = (item.hits || []).map(hit => `
+        <div class="threat-hit vuln-hit">
+            <div class="threat-hit-header">
+                <span class="threat-customer-name">${escHtml(hit.customer_name)}</span>
+                <span class="vuln-cve-badge">${escHtml(hit.cve_id)}</span>
+                ${hit.has_advisory ? '<span class="advisory-exists-badge">Advisory tracked</span>' : ''}
+            </div>
+            <p class="threat-matched-tech"><strong>Matched tech:</strong> ${escHtml(hit.matched_tech)}</p>
+            ${hit.match_evidence ? `<p class="threat-evidence">${escHtml(hit.match_evidence)}</p>` : ''}
+        </div>
+    `).join('');
+
+    card.innerHTML = `
+        <div class="threat-card-top">
+            <div>
+                <span class="source-badge">${escHtml(item.source_name || 'Unknown source')}</span>
+                <span class="article-date">${escHtml(dateStr)}</span>
+                ${triageBadge(status)}
+                ${advisoryBadge}
+            </div>
+            <div class="threat-card-actions">
+                <button class="btn btn-primary btn-sm" onclick="openVulnModal(${item.article_id})">Open &amp; create advisory</button>
+                ${triageActionButton('vuln', item.article_id, status)}
+            </div>
+        </div>
+        <h3 class="threat-article-title">
+            <a href="${escHtml(item.url)}" target="_blank" rel="noopener">${escHtml(item.title)}</a>
+        </h3>
+        <div class="threat-hits">${hitsHtml}</div>
+    `;
+    return card;
+}
+
+async function setTriageStatus(kind, articleId, status) {
+    const endpoint = kind === 'vuln'
+        ? `/api/vulnerabilities/${articleId}/triage`
+        : `/api/emerging-threats/${articleId}/triage`;
+    const card = document.querySelector(`.threat-card[data-article-id="${articleId}"]`);
+    const btn = card ? card.querySelector('.threat-card-actions .triage-btn, .threat-card-actions .btn-secondary') : null;
+    if (btn) btn.disabled = true;
+
+    try {
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ triage_status: status }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update triage status');
+
+        // Default queue view: remove the card once triaged
+        const viewingQueue = kind === 'vuln' ? vulnTriageStatus === 'pending' : threatTriageStatus === 'pending';
+        if (status === 'triaged' && viewingQueue && card) {
+            card.remove();
+            if (kind === 'vuln') {
+                vulnTotal = Math.max(0, vulnTotal - 1);
+                document.getElementById('vuln-count').textContent = `${vulnTotal} in queue`;
+                if (!document.getElementById('vuln-list').children.length) loadVulnerabilities();
+            } else {
+                threatTotal = Math.max(0, threatTotal - 1);
+                document.getElementById('threat-count').textContent = `${threatTotal} in queue`;
+                if (!document.getElementById('threat-list').children.length) loadEmergingThreats();
+            }
+            return;
+        }
+        if (kind === 'vuln') loadVulnerabilities();
+        else loadEmergingThreats();
+    } catch (e) {
+        console.error(e);
+        alert(e.message || 'Failed to update triage status');
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function openTiModal(articleId) {
+    const overlay = document.getElementById('ti-modal-overlay');
+    const body = document.getElementById('ti-modal-body');
+    overlay.style.display = 'flex';
+    body.innerHTML = '<p class="vuln-modal-loading">Loading article details...</p>';
+
+    try {
+        const res = await fetch(`/api/emerging-threats/${articleId}`);
+        if (!res.ok) throw new Error('Not found');
+        const item = await res.json();
+        await ensureSlackChannels();
+        body.innerHTML = renderTiModalContent(item);
+    } catch (e) {
+        body.innerHTML = '<p class="vuln-modal-error">Failed to load threat intelligence details.</p>';
+    }
+}
+
+function renderTiModalContent(item) {
+    const date = item.published_date || item.fetched_date || item.analyzed_date;
+    const dateStr = formatDate(date);
+    const preview = (item.content_raw || '').slice(0, 600);
+    const existingNote = item.has_advisory
+        ? `<p class="advisory-tracked-note">An advisory is already tracked for this article in the database${item.advisory && item.advisory.pdf_filename ? ` — <a href="/api/advisories/pdf/${escAttr(item.advisory.pdf_filename)}" target="_blank" rel="noopener">open PDF</a>` : ''}.</p>`
+        : '';
+
+    const hitsHtml = (item.hits || []).map((hit, idx) => `
+        <div class="vuln-modal-hit" id="ti-hit-${idx}">
+            <div class="vuln-modal-hit-top">
+                <div>
+                    <span class="threat-customer-name">${escHtml(hit.customer_name)}</span>
+                    <div class="threat-dimension-tags" style="display:inline-flex;margin-left:0.5rem;">
+                        ${(hit.match_dimensions || []).map(d =>
+                            `<span class="threat-dimension-tag">${escHtml(DIMENSION_LABELS[d] || d)}</span>`
+                        ).join('')}
+                    </div>
+                </div>
+            </div>
+            ${hit.match_evidence ? `<p class="threat-evidence"><strong>Why it matches:</strong> ${escHtml(hit.match_evidence)}</p>` : ''}
+            ${(hit.matched_tech && hit.matched_tech.length) ? `<p class="threat-matched-tech"><strong>Matched tech:</strong> ${hit.matched_tech.map(t => escHtml(t)).join(', ')}</p>` : ''}
+            ${(hit.matched_affiliates && hit.matched_affiliates.length) ? `<p class="threat-matched-aff"><strong>Matched affiliates:</strong> ${hit.matched_affiliates.map(a => escHtml(a)).join(', ')}</p>` : ''}
+            ${hit.distribution_outlook ? `<p class="threat-outlook"><strong>Adversary movement:</strong> ${escHtml(hit.distribution_outlook)}</p>` : ''}
+            ${renderChannelPicker(`ti-slack-channels-${idx}`, idx === 0)}
+            <div class="vuln-advisory-actions">
+                <button class="btn btn-primary btn-sm" id="ti-advisory-btn-${idx}"
+                    onclick="createTiAdvisory(${item.article_id}, ${hit.customer_id || 'null'}, '${escAttr(hit.customer_name || '')}', ${idx})">
+                    Create advisory
+                </button>
+                <span class="save-status" id="ti-advisory-status-${idx}"></span>
+            </div>
+            <div class="vuln-advisory-result" id="ti-advisory-result-${idx}" style="display:none;"></div>
+        </div>
+    `).join('');
+
+    return `
+        <div class="vuln-modal-meta">
+            <span class="source-badge">${escHtml(item.source_name || 'Unknown source')}</span>
+            <span class="article-date">${escHtml(dateStr)}</span>
+            <a href="${escHtml(item.url)}" target="_blank" rel="noopener" class="btn btn-secondary btn-sm">Original article</a>
+            <a href="/article/${item.article_id}" class="btn btn-secondary btn-sm">View in feed</a>
+        </div>
+        <h3 class="vuln-modal-title">${escHtml(item.title)}</h3>
+        ${existingNote}
+        ${preview ? `<p class="vuln-modal-preview">${escHtml(preview)}${(item.content_raw || '').length > 600 ? '…' : ''}</p>` : ''}
+        <h4 class="vuln-modal-section-title">Customer matches</h4>
+        <div class="vuln-modal-hits">${hitsHtml}</div>
+    `;
+}
+
+async function createTiAdvisory(articleId, customerId, customerName, hitIdx) {
+    const btn = document.getElementById(`ti-advisory-btn-${hitIdx}`);
+    const status = document.getElementById(`ti-advisory-status-${hitIdx}`);
+    const resultBox = document.getElementById(`ti-advisory-result-${hitIdx}`);
+
+    btn.disabled = true;
+    status.textContent = 'Researching threat and generating advisory…';
+    status.style.color = 'var(--text-secondary)';
+    resultBox.style.display = 'none';
+
+    try {
+        const res = await fetch('/api/emerging-threats/advisory', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                article_id: articleId,
+                customer_id: customerId,
+                customer_name: customerName,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Advisory generation failed');
+
+        status.textContent = 'Done — saved to Advisories';
+        status.style.color = 'var(--accent-green)';
+        resultBox.style.display = 'block';
+        resultBox.innerHTML = `
+            <div class="vuln-advisory-success">
+                <strong>Threat intelligence advisory created.</strong>
+                <p>PDF ready${customerName ? ` for ${escHtml(customerName)}` : ''}.</p>
+                <a href="${escHtml(data.pdf_url)}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">
+                    Download PDF
+                </a>
+            </div>
+        `;
+        await distributeAdvisory(data.advisory && data.advisory.id, `ti-slack-channels-${hitIdx}`, resultBox);
+        loadEmergingThreats();
+    } catch (e) {
+        status.textContent = e.message || 'Failed';
+        status.style.color = 'var(--accent-red)';
+        btn.disabled = false;
+    }
+}
+
+function closeTiModal() {
+    document.getElementById('ti-modal-overlay').style.display = 'none';
+}
+
+async function openVulnModal(articleId) {
+    const overlay = document.getElementById('vuln-modal-overlay');
+    const body = document.getElementById('vuln-modal-body');
+    overlay.style.display = 'flex';
+    body.innerHTML = '<p class="vuln-modal-loading">Loading article details...</p>';
+
+    try {
+        const res = await fetch(`/api/vulnerabilities/${articleId}`);
+        if (!res.ok) throw new Error('Not found');
+        const item = await res.json();
+        await ensureSlackChannels();
+        body.innerHTML = renderVulnModalContent(item);
+        loadCveRollups(item);
+    } catch (e) {
+        body.innerHTML = '<p class="vuln-modal-error">Failed to load vulnerability details.</p>';
+    }
+}
+
+function renderVulnModalContent(item) {
+    const date = item.published_date || item.fetched_date || item.analyzed_date;
+    const dateStr = formatDate(date);
+    const preview = (item.content_raw || '').slice(0, 600);
+    const existingNote = item.has_advisory
+        ? `<p class="advisory-tracked-note">At least one CVE on this article already has an advisory tracked in the database.</p>`
+        : '';
+
+    const hitsHtml = (item.hits || []).map((hit, idx) => `
+        <div class="vuln-modal-hit" id="vuln-hit-${idx}">
+            <div class="vuln-modal-hit-top">
+                <div>
+                    <span class="threat-customer-name">${escHtml(hit.customer_name)}</span>
+                    <span class="vuln-cve-badge">${escHtml(hit.cve_id)}</span>
+                    ${hit.has_advisory ? '<span class="advisory-exists-badge">Advisory tracked</span>' : ''}
+                </div>
+                <span class="vuln-tech-label">${escHtml(hit.matched_tech)}</span>
+            </div>
+            ${hit.match_evidence ? `<p class="threat-evidence">${escHtml(hit.match_evidence)}</p>` : ''}
+            <p class="cve-customer-rollup" data-cve="${escAttr(hit.cve_id)}">Checking other affected customers…</p>
+            ${renderChannelPicker(`vuln-slack-channels-${idx}`, idx === 0)}
+            <div class="vuln-advisory-actions">
+                <button class="btn btn-primary btn-sm" id="vuln-advisory-btn-${idx}"
+                    onclick="createAdvisory(${item.article_id}, '${escAttr(hit.cve_id)}', '${escAttr(hit.matched_tech)}', ${idx}, ${hit.customer_id || 'null'}, '${escAttr(hit.customer_name || '')}')">
+                    Create advisory
+                </button>
+                <span class="save-status" id="vuln-advisory-status-${idx}"></span>
+            </div>
+            <div class="vuln-advisory-result" id="vuln-advisory-result-${idx}" style="display:none;"></div>
+        </div>
+    `).join('');
+
+    return `
+        <div class="vuln-modal-meta">
+            <span class="source-badge">${escHtml(item.source_name || 'Unknown source')}</span>
+            <span class="article-date">${escHtml(dateStr)}</span>
+            <a href="${escHtml(item.url)}" target="_blank" rel="noopener" class="btn btn-secondary btn-sm">Original article</a>
+            <a href="/article/${item.article_id}" class="btn btn-secondary btn-sm">View in feed</a>
+        </div>
+        <h3 class="vuln-modal-title">${escHtml(item.title)}</h3>
+        ${existingNote}
+        ${preview ? `<p class="vuln-modal-preview">${escHtml(preview)}${(item.content_raw || '').length > 600 ? '…' : ''}</p>` : ''}
+        <h4 class="vuln-modal-section-title">Customer matches</h4>
+        <div class="vuln-modal-hits">${hitsHtml}</div>
+    `;
+}
+
+async function createAdvisory(articleId, cveId, matchedTech, hitIdx, customerId, customerName) {
+    const btn = document.getElementById(`vuln-advisory-btn-${hitIdx}`);
+    const status = document.getElementById(`vuln-advisory-status-${hitIdx}`);
+    const resultBox = document.getElementById(`vuln-advisory-result-${hitIdx}`);
+
+    btn.disabled = true;
+    status.textContent = 'Researching CVE and generating advisory…';
+    status.style.color = 'var(--text-secondary)';
+    resultBox.style.display = 'none';
+
+    try {
+        const res = await fetch('/api/vulnerabilities/advisory', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                article_id: articleId,
+                cve_id: cveId,
+                matched_tech: matchedTech,
+                customer_id: customerId,
+                customer_name: customerName,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Advisory generation failed');
+
+        status.textContent = 'Done — saved to Advisories';
+        status.style.color = 'var(--accent-green)';
+        resultBox.style.display = 'block';
+        resultBox.innerHTML = `
+            <div class="vuln-advisory-success">
+                <strong>Advisory report created.</strong>
+                <p>PDF ready for ${escHtml(cveId)} / ${escHtml(matchedTech)}.</p>
+                <a href="${escHtml(data.pdf_url)}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">
+                    Download PDF
+                </a>
+            </div>
+        `;
+        await distributeAdvisory(data.advisory && data.advisory.id, `vuln-slack-channels-${hitIdx}`, resultBox);
+        loadVulnerabilities();
+    } catch (e) {
+        status.textContent = e.message || 'Failed';
+        status.style.color = 'var(--accent-red)';
+        btn.disabled = false;
+    }
+}
+
+function closeVulnModal() {
+    document.getElementById('vuln-modal-overlay').style.display = 'none';
+}
+
+// --- Cross-article CVE roll-up -------------------------------------------
+// The queue shows one article at a time, so a CVE that hits several customers
+// across different articles looks narrower than it is. This fills in the rest.
+
+async function loadCveRollups(item) {
+    const cves = [...new Set((item.hits || []).map(h => h.cve_id).filter(Boolean))];
+    await Promise.all(cves.map(async cve => {
+        const targets = document.querySelectorAll(`.cve-customer-rollup[data-cve="${CSS.escape(cve)}"]`);
+        if (!targets.length) return;
+        try {
+            const res = await fetch(`/api/cve/${encodeURIComponent(cve)}/customers`);
+            const data = await res.json();
+            const html = renderCveRollup(data.customers || []);
+            targets.forEach(el => {
+                if (html) el.innerHTML = html;
+                else el.remove();
+            });
+        } catch (e) {
+            targets.forEach(el => el.remove());
+        }
+    }));
+}
+
+function renderCveRollup(customers) {
+    if (!customers.length) return '';
+    const parts = customers.map(c => {
+        const techs = (c.matched_tech || []).map(t => escHtml(t)).join(', ');
+        const articles = (c.articles || []).length;
+        const label = techs ? `${escHtml(c.customer_name)} (${techs})` : escHtml(c.customer_name);
+        return `${label}<span class="cve-rollup-articles"> — ${articles} article${articles === 1 ? '' : 's'}</span>`;
+    });
+    return `<strong>Affects ${customers.length} customer${customers.length === 1 ? '' : 's'}:</strong> ${parts.join('; ')}`;
+}
+
+// --- Slack distribution ---------------------------------------------------
+
+let slackChannelState = null;
+
+async function ensureSlackChannels() {
+    if (slackChannelState) return slackChannelState;
+    try {
+        const res = await fetch('/api/slack/channels');
+        const data = await res.json();
+        slackChannelState = {
+            configured: !!data.configured,
+            channels: data.channels || [],
+            error: data.error || null,
+        };
+    } catch (e) {
+        slackChannelState = { configured: false, channels: [], error: null };
+    }
+    return slackChannelState;
+}
+
+// showEmptyHint is set for the first hit only, so a misconfigured bot explains
+// itself once per modal instead of once per match.
+function renderChannelPicker(selectId, showEmptyHint) {
+    const state = slackChannelState;
+    if (!state || !state.configured) return '';
+    if (!state.channels.length) {
+        if (!showEmptyHint) return '';
+        const why = state.error
+            ? escHtml(state.error)
+            : 'invite the bot to a channel with /invite';
+        return `<p class="form-hint slack-picker-empty">Slack is enabled but no channels are available — ${why}.</p>`;
+    }
+    const options = state.channels.map(c => `
+        <option value="${escAttr(c.id)}" data-name="${escAttr(c.name)}">
+            #${escHtml(c.name)}${c.is_private ? ' (private)' : ''}
+        </option>`).join('');
+    return `
+        <div class="slack-channel-picker">
+            <label for="${selectId}">Send to Slack channels</label>
+            <select id="${selectId}" class="form-input" multiple size="4">${options}</select>
+            <span class="form-hint">Optional — hold Ctrl/Cmd to select several. The PDF is attached to the message.</span>
+        </div>
+    `;
+}
+
+async function distributeAdvisory(advisoryId, selectId, resultBox) {
+    const select = document.getElementById(selectId);
+    if (!advisoryId || !select) return;
+    const selected = Array.from(select.selectedOptions);
+    if (!selected.length) return;
+
+    const channelNames = {};
+    selected.forEach(o => { channelNames[o.value] = o.dataset.name; });
+
+    const line = document.createElement('div');
+    line.className = 'slack-distribution-result';
+    line.textContent = 'Sending to Slack…';
+    resultBox.appendChild(line);
+
+    try {
+        const res = await fetch(`/api/advisories/${advisoryId}/distribute`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                channels: selected.map(o => o.value),
+                channel_names: channelNames,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Slack distribution failed');
+        line.innerHTML = renderDistributionResults(data.results || []);
+    } catch (e) {
+        line.innerHTML = `<span style="color:var(--accent-red);">Slack: ${escHtml(e.message || 'failed')}</span>`;
+    }
+}
+
+function renderDistributionResults(results) {
+    const rows = results.map(r => {
+        const name = r.channel_name ? `#${r.channel_name}` : r.channel_id;
+        return r.status === 'sent'
+            ? `<li style="color:var(--accent-green);">${escHtml(name)} — sent</li>`
+            : `<li style="color:var(--accent-red);">${escHtml(name)} — ${escHtml(r.error_message || 'failed')}</li>`;
+    }).join('');
+    return `<strong>Slack delivery</strong><ul class="slack-result-list">${rows}</ul>`;
+}
+
+async function analyzeMissingThreats() {
+    const btn = document.getElementById('threat-analyze-btn');
+    const status = document.getElementById('threat-analyze-status');
+    btn.disabled = true;
+    status.textContent = 'Analyzing...';
+    status.style.color = 'var(--text-secondary)';
+
+    try {
+        const res = await fetch('/api/emerging-threats/analyze-missing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ limit: 10 }),
+        });
+        const data = await res.json();
+        status.textContent = `Processed ${data.processed || 0} article(s)`;
+        status.style.color = 'var(--accent-green)';
+        threatPage = 1;
+        loadEmergingThreats();
+    } catch (e) {
+        status.textContent = 'Analysis failed';
+        status.style.color = 'var(--accent-red)';
+    } finally {
+        btn.disabled = false;
+        setTimeout(() => { status.textContent = ''; }, 5000);
+    }
+}
+
+async function analyzeMissingVulnerabilities() {
+    const btn = document.getElementById('vuln-analyze-btn');
+    const status = document.getElementById('vuln-analyze-status');
+    btn.disabled = true;
+    status.textContent = 'Analyzing...';
+    status.style.color = 'var(--text-secondary)';
+
+    try {
+        const res = await fetch('/api/vulnerabilities/analyze-missing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ limit: 10 }),
+        });
+        const data = await res.json();
+        status.textContent = `Processed ${data.processed || 0} article(s)`;
+        status.style.color = 'var(--accent-green)';
+        vulnPage = 1;
+        loadVulnerabilities();
+    } catch (e) {
+        status.textContent = 'Analysis failed';
+        status.style.color = 'var(--accent-red)';
+    } finally {
+        btn.disabled = false;
+        setTimeout(() => { status.textContent = ''; }, 5000);
+    }
+}
+
+function threatPageChange(delta) {
+    const maxPage = Math.max(1, Math.ceil(threatTotal / threatLimit));
+    threatPage = Math.min(maxPage, Math.max(1, threatPage + delta));
+    loadEmergingThreats();
+}
+
+function vulnPageChange(delta) {
+    const maxPage = Math.max(1, Math.ceil(vulnTotal / vulnLimit));
+    vulnPage = Math.min(maxPage, Math.max(1, vulnPage + delta));
+    loadVulnerabilities();
+}
+
+function updateThreatPagination() {
+    const maxPage = Math.max(1, Math.ceil(threatTotal / threatLimit));
+    document.getElementById('threat-page-label').textContent = `Page ${threatPage} of ${maxPage}`;
+    document.getElementById('threat-prev').disabled = threatPage <= 1;
+    document.getElementById('threat-next').disabled = threatPage >= maxPage;
+}
+
+function updateVulnPagination() {
+    const maxPage = Math.max(1, Math.ceil(vulnTotal / vulnLimit));
+    document.getElementById('vuln-page-label').textContent = `Page ${vulnPage} of ${maxPage}`;
+    document.getElementById('vuln-prev').disabled = vulnPage <= 1;
+    document.getElementById('vuln-next').disabled = vulnPage >= maxPage;
+}
+
+async function loadAdvisories() {
+    const list = document.getElementById('advisory-list');
+    const empty = document.getElementById('advisory-empty');
+    const params = new URLSearchParams({
+        page: advisoryPage,
+        limit: advisoryLimit,
+        kind: advisoryKind,
+    });
+    if (advisorySearch) params.set('search', advisorySearch);
+
+    try {
+        const res = await fetch('/api/advisories?' + params);
+        const data = await res.json();
+        advisoryTotal = data.total;
+        list.innerHTML = '';
+
+        document.getElementById('advisory-count').textContent = advisoryKind === 'vulnerability'
+            ? `${advisoryTotal} vulnerability advisories`
+            : `${advisoryTotal} advisories`;
+        if (advisoryTotal === 1) {
+            document.getElementById('advisory-count').textContent = advisoryKind === 'vulnerability'
+                ? '1 vulnerability advisory'
+                : '1 advisory';
+        }
+
+        if (!data.advisories || data.advisories.length === 0) {
+            empty.style.display = 'block';
+        } else {
+            empty.style.display = 'none';
+            await ensureSlackChannels();
+            data.advisories.forEach(a => list.appendChild(createAdvisoryCard(a)));
+        }
+        updateAdvisoryPagination();
+    } catch (e) {
+        console.error('Failed to load advisories:', e);
+    }
+}
+
+function createAdvisoryCard(item) {
+    const card = document.createElement('article');
+    card.className = 'threat-card advisory-card';
+    const dateStr = formatDate(item.created_date);
+    const kindLabel = item.kind === 'vulnerability'
+        ? 'Vulnerability'
+        : (item.kind === 'threat_intelligence' ? 'Threat Intelligence' : 'General');
+
+    card.innerHTML = `
+        <div class="threat-card-top">
+            <div>
+                <span class="advisory-kind-badge ${escHtml(item.kind || 'general')}">${escHtml(kindLabel)}</span>
+                ${item.cve_id ? `<span class="vuln-cve-badge">${escHtml(item.cve_id)}</span>` : ''}
+                <span class="article-date">${escHtml(dateStr)}</span>
+            </div>
+            <a href="${escHtml(item.pdf_url)}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Download PDF</a>
+        </div>
+        <h3 class="threat-article-title">${escHtml(item.title)}</h3>
+        <div class="advisory-meta-row">
+            ${item.technology ? `<span><strong>Tech:</strong> ${escHtml(item.technology)}</span>` : ''}
+            ${item.customer_name ? `<span><strong>Customer:</strong> ${escHtml(item.customer_name)}</span>` : ''}
+            ${item.article_id ? `<a href="/article/${item.article_id}" class="btn btn-secondary btn-sm">Source article</a>` : ''}
+            ${slackAvailable() ? `<button class="btn btn-secondary btn-sm" onclick="toggleAdvisorySlack(${item.id})">Send to Slack</button>` : ''}
+        </div>
+        ${slackAvailable() ? `
+        <div class="advisory-slack-panel" id="advisory-slack-panel-${item.id}" style="display:none;">
+            ${renderChannelPicker(`advisory-slack-channels-${item.id}`)}
+            <button class="btn btn-primary btn-sm" onclick="sendAdvisoryToSlack(${item.id})">Send</button>
+            <div class="vuln-advisory-result" id="advisory-slack-result-${item.id}"></div>
+        </div>` : ''}
+    `;
+    return card;
+}
+
+function slackAvailable() {
+    return !!(slackChannelState && slackChannelState.configured && slackChannelState.channels.length);
+}
+
+function toggleAdvisorySlack(advisoryId) {
+    const panel = document.getElementById(`advisory-slack-panel-${advisoryId}`);
+    if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+async function sendAdvisoryToSlack(advisoryId) {
+    const resultBox = document.getElementById(`advisory-slack-result-${advisoryId}`);
+    if (!resultBox) return;
+    resultBox.innerHTML = '';
+    const select = document.getElementById(`advisory-slack-channels-${advisoryId}`);
+    if (select && !select.selectedOptions.length) {
+        resultBox.innerHTML = '<span class="form-hint">Select at least one channel.</span>';
+        return;
+    }
+    await distributeAdvisory(advisoryId, `advisory-slack-channels-${advisoryId}`, resultBox);
+}
+
+function advisoryPageChange(delta) {
+    const maxPage = Math.max(1, Math.ceil(advisoryTotal / advisoryLimit));
+    advisoryPage = Math.min(maxPage, Math.max(1, advisoryPage + delta));
+    loadAdvisories();
+}
+
+function updateAdvisoryPagination() {
+    const maxPage = Math.max(1, Math.ceil(advisoryTotal / advisoryLimit));
+    document.getElementById('advisory-page-label').textContent = `Page ${advisoryPage} of ${maxPage}`;
+    document.getElementById('advisory-prev').disabled = advisoryPage <= 1;
+    document.getElementById('advisory-next').disabled = advisoryPage >= maxPage;
+}
+
+function formatDate(date) {
+    return date ? new Date(date).toLocaleDateString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+    }) : '';
+}
+
+function escHtml(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+}
+
+function escAttr(str) {
+    return escHtml(str).replace(/'/g, '&#39;');
+}
+</script>
+{% endblock %}

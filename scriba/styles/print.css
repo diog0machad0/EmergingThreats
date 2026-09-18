@@ -1,0 +1,110 @@
+@page {
+  size: A4;
+  margin: 25.4mm 25.4mm 25.4mm 25.4mm;
+
+  @top-left-corner { content: none; }
+  @top-right-corner { content: none; }
+  @bottom-left-corner { content: none; }
+  @bottom-right-corner { content: none; }
+
+  @top-left {
+    content: element(page-header-brand);
+    vertical-align: bottom;
+    padding-bottom: 6mm;
+  }
+
+  @top-right {
+    content: element(page-header-tlp);
+    vertical-align: bottom;
+    padding-bottom: 6mm;
+  }
+
+  @bottom-left {
+    content: string(report-rights);
+    vertical-align: top;
+    padding-top: 3mm;
+    border-top: 0.5pt solid #c9c9c9;
+    font-family: "Ubuntu", "Calibri", "Carlito", "Helvetica Neue", Arial, sans-serif;
+    font-size: 10pt;
+    color: #595959;
+  }
+
+  @bottom-center {
+    content: "";
+    vertical-align: top;
+    padding-top: 3mm;
+    border-top: 0.5pt solid #c9c9c9;
+  }
+
+  @bottom-right {
+    content: "Page " counter(page) " of " counter(pages);
+    vertical-align: top;
+    padding-top: 3mm;
+    border-top: 0.5pt solid #c9c9c9;
+    font-family: "Ubuntu", "Calibri", "Carlito", "Helvetica Neue", Arial, sans-serif;
+    font-size: 10pt;
+    color: #595959;
+  }
+}
+
+.header-brand {
+  position: running(page-header-brand);
+  line-height: 0;
+}
+
+.header-brand-logo {
+  height: 11mm;
+  width: auto;
+  display: block;
+}
+
+.header-tlp {
+  position: running(page-header-tlp);
+  font-family: "Ubuntu", "Calibri", "Carlito", "Helvetica Neue", Arial, sans-serif;
+  font-size: 10pt;
+  letter-spacing: 0.02em;
+  text-align: right;
+}
+
+.header-tlp .tlp-label {
+  color: #595959;
+  font-weight: 400;
+  margin-right: 0.25rem;
+}
+
+.header-tlp .tlp-value {
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.header-tlp.tlp-white .tlp-value { color: #BFBFBF; }
+.header-tlp.tlp-green .tlp-value { color: #2E7D32; }
+.header-tlp.tlp-amber .tlp-value { color: #E08E0B; }
+.header-tlp.tlp-red .tlp-value { color: #C62828; }
+
+.meta-string-rights {
+  string-set: report-rights content(text);
+  position: absolute;
+  left: -10000px;
+  top: -10000px;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.meta-string-author {
+  display: none;
+}
+
+.report {
+  widows: 3;
+  orphans: 3;
+}
+
+.report-body img {
+  max-width: 100%;
+}
+
+.content-page {
+  break-before: avoid;
+}

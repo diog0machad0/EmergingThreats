@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reportgen"
+version = "0.1.0"
+description = "Production-style cybersecurity advisory PDF generator"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "jinja2",
+  "markdown-it-py",
+  "mdit-py-plugins",
+  "pyyaml",
+  "beautifulsoup4",
+  "weasyprint",
+]
