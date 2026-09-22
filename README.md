@@ -101,7 +101,7 @@ asked to *explain* matches it is given, never to invent them.
 |-------------|-------|
 | **Python 3.10+** | Tested on 3.14. Standard-library `venv` is sufficient. |
 | **An LLM API key** | OpenAI **or** Anthropic **or** OpenRouter. Required for summarization, matching explanations, advisories and chat. |
-| **OpenAI key (situational)** | Embeddings use OpenAI. Needed only for **Intelligence** semantic search / RAG chat if your main provider is not OpenAI. |
+| **OpenAI key (situational)** | Only needed if your provider is Anthropic or OpenRouter, which have no embeddings endpoint. Without it those two lose semantic search, RAG chat and digest clustering. OpenAI and Gemini embed with their own key. |
 | **Pango / Cairo** | Needed by WeasyPrint for advisory PDFs. Bundled on Windows wheels; on Linux install `libpango-1.0-0 libpangoft2-1.0-0 libcairo2`, on macOS `brew install pango cairo`. |
 | **Docker** | Optional — only to run a local MISP instance from `misp/`. |
 | **Slack workspace** | Optional — only for advisory distribution. |
@@ -176,14 +176,15 @@ overridden from the UI. For day-to-day use, prefer **Settings**.
 
 ### 1. LLM provider (required)
 
-Go to **Settings → LLM Provider** and pick one of OpenAI, Anthropic or
-OpenRouter, then paste the matching key and press **Test**.
+Go to **Settings → LLM Provider** and pick one of OpenAI, Anthropic, OpenRouter
+or Gemini, then paste the matching key and press **Test**.
 
 | Provider | Default model | Notes |
 |----------|---------------|-------|
 | OpenAI | `gpt-4.1-mini` | Fastest path; also covers embeddings. |
 | Anthropic | `claude-haiku-4-5` | Chat only — embeddings still need an OpenAI key. |
 | OpenRouter | `google/gemma-4-31b-it:free` | Free models available; see limits below. |
+| Gemini | `gemini-flash-lite-latest` | Free tier, no billing account, and covers embeddings too. |
 
 > **Pin a concrete model.** Avoid OpenRouter's `openrouter/free` router alias: it
 > picks an arbitrary free model per call, and models differ in whether they
@@ -219,6 +220,61 @@ under $10 in lifetime credits. Buying $10 of credits once raises the daily cap t
 50 requests/day is enough to explore the UI, but a single full pipeline run over
 a day of feeds will exceed it. For real use, either buy the $10 of credits or use
 an OpenAI key.
+
+#### Getting a Gemini API key
+
+Gemini is the other no-cost option, and its free daily allowance is considerably
+more generous than OpenRouter's. It needs no billing account and no extra Python
+package: the app talks to Google's OpenAI-compatible endpoint
+(`https://generativelanguage.googleapis.com/v1beta/openai/`) through the OpenAI
+client that is already installed.
+
+1. Go to **https://aistudio.google.com/apikey** and sign in with a Google account.
+2. Click **Create API key** and pick (or let it create) a project.
+3. Copy the key. It starts with `AIza`.
+4. In the app: **Settings → LLM Provider → Gemini**, paste the key into
+   **Gemini API Key**, click **Test**, then **Save Settings**.
+
+**Choosing a model.** Only Flash and Flash-Lite are on the free tier; the Pro
+models now require billing. Flash-Lite carries the largest free daily request
+allowance, which is what a full feed run needs.
+
+The dropdown is populated from your key rather than hardcoded, so it only lists
+models your account can reach. Use the **Load** button to refresh it. Be aware
+that Google keeps retired models in the listing: `gemini-2.5-flash-lite` is
+still advertised but returns `404 no longer available to new users` when called.
+Listing is therefore not proof of availability, which is why **Test** runs a real
+completion against the model you picked.
+
+The default is `gemini-flash-lite-latest`, an alias rather than a pinned version,
+so it keeps working as Google rotates concrete ids underneath it.
+
+Measured on this pipeline's JSON summarization prompt, all of these work:
+
+| Model | Round trip |
+|-------|-----------|
+| `gemini-3.5-flash-lite` | ~1.2 s |
+| `gemini-flash-lite-latest` | ~1.9 s |
+| `gemini-3.1-flash-lite` | ~3.0 s |
+| `gemini-3.5-flash` | ~8.3 s |
+| `gemini-flash-latest` | ~40 s, and returned 503 under load |
+
+**Thinking budgets.** This pipeline leans heavily on JSON-mode responses, and
+Gemini's thinking tokens count against the output limit, so an unbounded
+thinking budget truncates the JSON mid-object. The app sets `reasoning_effort`
+to `none` on 2.5 models, where reasoning can be switched off outright, and to
+`low` elsewhere with double the output allowance, since 3.x only allows turning
+it down.
+
+**Free-tier limits.** Google no longer publishes a fixed table and adjusts quotas
+without notice. Independent trackers put Flash-Lite at roughly 15 requests per
+minute with a daily cap in the hundreds to low thousands. Quotas are tracked per
+**project**, so extra keys in the same project do not raise them, and they reset
+at midnight Pacific. Check your live numbers in AI Studio before a large backfill.
+
+**Embeddings are included.** Gemini embeds with `gemini-embedding-001` on the
+same key and the same endpoint, so semantic search, RAG chat and digest story
+clustering all work without an OpenAI key. Gemini is therefore free end to end.
 
 ### 2. Slack advisory distribution
 

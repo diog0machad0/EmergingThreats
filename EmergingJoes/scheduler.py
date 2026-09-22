@@ -485,7 +485,7 @@ def _run_digest(force=False):
     try:
         from datetime import datetime, timedelta
         from database import get_last_digest_sent_at, get_articles_with_embeddings_since, log_digest_sent
-        from embeddings import cluster_articles_by_similarity
+        from embeddings import cluster_articles_by_similarity, get_embedding_model
         from summarizer import synthesize_digest_story
         from notifier import send_digest_email
 
@@ -519,14 +519,16 @@ def _run_digest(force=False):
         period_label = f"{since_label} to {today_label}"
 
         logger.info(f"Running digest: articles since {since_dt}")
-        articles = get_articles_with_embeddings_since(since_dt)
+        articles = get_articles_with_embeddings_since(
+            since_dt, model_used=get_embedding_model()
+        )
 
         if not articles:
             logger.info("Digest: no new articles since last digest, skipping email")
             return
 
         logger.info(f"Digest: clustering {len(articles)} articles")
-        clusters = cluster_articles_by_similarity(articles, threshold=0.82)
+        clusters = cluster_articles_by_similarity(articles)
         logger.info(f"Digest: {len(clusters)} story clusters")
 
         stories = []

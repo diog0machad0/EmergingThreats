@@ -53,6 +53,8 @@ def get_default_config():
         "anthropic_model": "claude-haiku-4-5-20251001",
         "openrouter_api_key": "",
         "openrouter_model": "google/gemma-4-31b-it:free",
+        "gemini_api_key": "",
+        "gemini_model": "gemini-flash-lite-latest",
         "malpedia_api_key": "",
         "fetch_interval_minutes": 30,
         "feeds": _load_example_feeds(),
@@ -112,7 +114,8 @@ def load_config():
 
     # Ensure newer keys exist for older config.json files
     defaults = get_default_config()
-    for key in ("openrouter_api_key", "openrouter_model", "anthropic_api_key", "anthropic_model"):
+    for key in ("openrouter_api_key", "openrouter_model", "anthropic_api_key",
+                "anthropic_model", "gemini_api_key", "gemini_model"):
         config.setdefault(key, defaults.get(key, ""))
     config.setdefault("slack_bot_token", defaults.get("slack_bot_token", ""))
     config.setdefault("slack_enabled", defaults.get("slack_enabled", False))
@@ -127,6 +130,10 @@ def load_config():
     env_openrouter = os.environ.get("OPENROUTER_API_KEY")
     if env_openrouter:
         config["openrouter_api_key"] = env_openrouter
+    # GOOGLE_API_KEY is what the Google SDKs read, so accept it as an alias.
+    env_gemini = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if env_gemini:
+        config["gemini_api_key"] = env_gemini
     env_provider = os.environ.get("LLM_PROVIDER")
     if env_provider:
         config["llm_provider"] = env_provider

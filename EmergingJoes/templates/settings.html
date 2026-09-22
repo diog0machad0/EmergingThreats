@@ -13,13 +13,14 @@
                 <button type="button" class="provider-btn {% if config.llm_provider == 'openai' or not config.llm_provider %}active{% endif %}" data-provider="openai" onclick="switchProvider('openai')">OpenAI</button>
                 <button type="button" class="provider-btn {% if config.llm_provider == 'anthropic' %}active{% endif %}" data-provider="anthropic" onclick="switchProvider('anthropic')">Anthropic</button>
                 <button type="button" class="provider-btn {% if config.llm_provider == 'openrouter' %}active{% endif %}" data-provider="openrouter" onclick="switchProvider('openrouter')">OpenRouter</button>
+                <button type="button" class="provider-btn {% if config.llm_provider == 'gemini' %}active{% endif %}" data-provider="gemini" onclick="switchProvider('gemini')">Gemini</button>
             </div>
             <input type="hidden" id="llm-provider" value="{{ config.llm_provider or 'openai' }}">
-            <p class="form-hint" style="margin-top:8px;">Used for summarization, threat analysis, advisory generation, and intelligence chat. All three providers are supported across those flows.</p>
+            <p class="form-hint" style="margin-top:8px;">Used for summarization, threat analysis, advisory generation, and intelligence chat. All four providers are supported across those flows.</p>
         </div>
 
         <!-- OpenAI section -->
-        <div id="openai-section" {% if config.llm_provider in ['anthropic', 'openrouter'] %}style="display:none;"{% endif %}>
+        <div id="openai-section" {% if config.llm_provider in ['anthropic', 'openrouter', 'gemini'] %}style="display:none;"{% endif %}>
             <div class="form-group">
                 <label for="api-key">OpenAI API Key</label>
                 <div class="input-with-action">
@@ -83,10 +84,47 @@
             </div>
         </div>
 
-        <!-- Embeddings key for non-OpenAI providers -->
+        <!-- Gemini section -->
+        <div id="gemini-section" {% if config.llm_provider != 'gemini' %}style="display:none;"{% endif %}>
+            <div class="form-group">
+                <label for="gemini-key">Gemini API Key</label>
+                <div class="input-with-action">
+                    <input type="password" id="gemini-key" class="form-input" placeholder="AIza..." value="{{ config.gemini_api_key or '' }}">
+                    <button class="btn btn-secondary btn-sm" onclick="testGeminiKey()">Test</button>
+                </div>
+                <span class="form-hint" id="gemini-key-status"></span>
+                <p class="form-hint" style="margin-top:6px;">
+                    Get a key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.
+                    No billing account is required: Flash and Flash-Lite models run on Google's free tier.
+                </p>
+            </div>
+            <div class="form-group">
+                <label for="gemini-model-select">Model</label>
+                <div class="input-with-action">
+                    <select id="gemini-model-select" class="form-input">
+                        {% if config.gemini_model %}<option value="{{ config.gemini_model }}" selected>{{ config.gemini_model }}</option>{% endif %}
+                    </select>
+                    <button class="btn btn-secondary btn-sm" onclick="refreshGeminiModels(true)">Load</button>
+                </div>
+                <span class="form-hint" id="gemini-model-status"></span>
+                <p class="form-hint" style="margin-top:6px;">
+                    The list is read from your key, so it only ever shows models your account can
+                    actually reach. Prefer Flash-Lite: it carries the highest free daily request
+                    allowance, which is what a full feed run needs. Free-tier quotas are per project
+                    and Google changes them without notice, so check your live limits in AI Studio
+                    before a large backfill.
+                </p>
+                <p class="form-hint" style="margin-top:6px;">
+                    Embeddings use <code>gemini-embedding-001</code> on this same key, so semantic
+                    search and RAG chat work without an OpenAI key.
+                </p>
+            </div>
+        </div>
+
+        <!-- Embeddings key, only for providers with no embeddings endpoint of their own -->
         <div id="embed-key-section" {% if config.llm_provider not in ['anthropic', 'openrouter'] %}style="display:none;"{% endif %}>
             <div class="form-group" style="margin-top:8px;">
-                <p class="form-hint">Embeddings / semantic search still use OpenAI. Add an OpenAI key below if you want those features while using Anthropic or OpenRouter for LLM tasks.</p>
+                <p class="form-hint">Anthropic and OpenRouter do not offer embeddings, so semantic search, RAG chat and digest story clustering fall back to OpenAI. Add an OpenAI key below to enable them. OpenAI and Gemini embed with their own key and do not need this.</p>
             </div>
             <div class="form-group">
                 <label for="embed-api-key">OpenAI API Key <span style="font-weight:400;color:var(--text-secondary);">(for embeddings)</span></label>
@@ -360,6 +398,11 @@
 <script>
     document.addEventListener('DOMContentLoaded', () => {
         loadStats();
+        // Refresh the Gemini list on load so a model Google has since retired
+        // is replaced before the analyst tries to run a pipeline with it.
+        if (document.getElementById('llm-provider').value === 'gemini') {
+            refreshGeminiModels(false);
+        }
     });
 
 </script>

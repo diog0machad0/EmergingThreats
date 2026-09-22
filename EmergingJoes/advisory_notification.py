@@ -1,9 +1,18 @@
-"""Security Vulnerability Notification — the distribution message format.
+"""Advisory distribution messages — one approved format per customer.
 
-The LLM only extracts field *values*; the layout below is rendered in code.
-Letting the model emit the whole message invites reordered, renamed, or dropped
-lines, and this notification is a client-facing deliverable whose shape is
-fixed.
+Customers do not share a message format. Evoke uses the structured
+"Security Vulnerability Notification" field block; Fidelidade uses a prose
+covering note. Each customer's format is stored on its own row in the
+``customers`` table and edited on the Customers page, so adding a client is a
+configuration change rather than a code change.
+
+The constants below are the seed templates used when a customer has no format
+of its own yet. ``NOTIFICATION_TEMPLATE`` remains Evoke's approved layout.
+
+Whichever format is in play, the LLM only ever supplies field *values* as JSON.
+Layout is substituted in code by ``render_template()``, which is pure. Letting
+the model emit a whole message invites reordered, renamed, or dropped lines,
+and these are client-facing deliverables whose shape is fixed.
 """
 
 import json
@@ -371,6 +380,341 @@ def render(fields, advisory, article_url=None):
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Per-customer templates
+#
+# A template is Slack mrkdwn written by the analyst, with <PLACEHOLDER> tokens.
+# The template text itself is emitted verbatim, so *bold*, literal mentions
+# like @SOCIberia_DXC and tag lines such as [Security Advisory] survive intact.
+# Only substituted values are Slack-escaped.
+# ---------------------------------------------------------------------------
+
+# Uppercase only, so ordinary prose containing "<" is never mistaken for a
+# placeholder. Spaces, slashes and hyphens are allowed because analysts write
+# descriptive tokens like <VULNERABILITY-TYPE / SHORT DESCRIPTION>.
+PLACEHOLDER_RE = re.compile(r"<([A-Z][A-Z0-9 _/&.\-]*)>")
+
+# Tokens filled from data we already hold. These are never sent to the model:
+# it has no business guessing a CVE we were given or a remediation deadline
+# that comes from a table.
+COMPUTED_TOKENS = (
+    "ADVISORY-DATE",
+    "CVE-ID",
+    "SEVERITY",
+    "PDF-FILENAME",
+    "CUSTOMER-NAME",
+    "RECOMMENDATIONS",
+    "PRIORITY-BULLET",
+    "REMEDIATION-DATE",
+)
+
+# Tokens that map onto the existing extraction schema, so a template using them
+# costs no extra prompt work.
+_KNOWN_FIELD_TOKENS = {
+    "VULNERABILITY-NAME": "vulnerability_name",
+    "THREAT-NAME": "vulnerability_name",
+    "VENDOR-PRODUCT": "vendor_product",
+    "AFFECTED-PRODUCT": "vendor_product",
+    "CVES": "cves",
+    "ADVISORY-ID": "advisory_id",
+    "AFFECTED-VERSIONS": "affected_versions",
+    "FIXED-VERSION": "fixed_version",
+    "DESCRIPTION": "description",
+}
+
+# Tokens whose blank value is not "N/A", matching the approved wording.
+_TOKEN_DEFAULTS = {
+    "FIXED-VERSION": "Not available",
+    "DESCRIPTION": "See the attached advisory for full details.",
+}
+
+_CUSTOM_EXTRACTION_SYSTEM = (
+    "You are a security analyst preparing a client notification. You fill in "
+    "named gaps in a message using only facts stated in the supplied advisory, "
+    "and never invent versions, identifiers, or severities."
+)
+
+_CUSTOM_EXTRACTION_PROMPT = """Fill in the placeholders for a client advisory notification.
+
+Return a JSON object whose keys are exactly the placeholder names listed below
+and whose values are the text that should replace them.
+
+Each value must:
+- be plain text, no markdown, no bullets, no surrounding quotes
+- read naturally when substituted into the sentence shown in the template
+- be a short phrase or clause, not a full paragraph, unless the placeholder name asks for a description
+- start lowercase and omit a trailing full stop when the placeholder sits mid-sentence
+- be "N/A" if the advisory genuinely does not state it. Do not guess.
+
+PLACEHOLDERS TO FILL
+{placeholders}
+
+THE TEMPLATE THEY APPEAR IN, for context on how each value will read
+{template}
+
+ADVISORY CONTEXT
+Title: {title}
+CVE from triage: {cve_id}
+Affected technology from triage: {technology}
+
+ADVISORY DOCUMENT
+{markdown}
+"""
+
+
+def extract_placeholders(template):
+    """Return the unique <PLACEHOLDER> tokens in a template, in order."""
+    seen, ordered = set(), []
+    for token in PLACEHOLDER_RE.findall(template or ""):
+        name = token.strip()
+        if name and name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def computed_values(advisory, fields, customer_name=None):
+    """Values we can fill without asking the model. Pure."""
+    advisory = advisory or {}
+    fields = fields or {}
+    date = _advisory_date(advisory)
+    severity = _normalize_severity(fields.get("severity"))
+    days = REMEDIATION_DAYS.get(severity, DEFAULT_REMEDIATION_DAYS)
+
+    actions = [a for a in (fields.get("recommendations") or []) if _clean(a, "")]
+    if not actions:
+        actions = [fallback_fields(advisory)["recommendations"][0]]
+
+    return {
+        "ADVISORY-DATE": format_advisory_date(date),
+        "CVE-ID": _clean(advisory.get("cve_id") or fields.get("cves")),
+        "SEVERITY": severity,
+        "PDF-FILENAME": advisory.get("pdf_filename") or "advisory.pdf",
+        "CUSTOMER-NAME": _clean(customer_name or advisory.get("customer_name"), ""),
+        "RECOMMENDATIONS": "\n".join(f"\u2022 {a}" for a in actions),
+        "PRIORITY-BULLET": f"\u2022 {_priority_bullet(severity, date)}",
+        "REMEDIATION-DATE": format_advisory_date(date + timedelta(days=days)),
+    }
+
+
+# "u" and "eu" spellings that are pronounced with a leading consonant, so
+# "a user" rather than "an user".
+_CONSONANT_SOUND_VOWEL = re.compile(
+    r"^(?:uni|use|usu|util|usa|ubiq|ukr|eu|one|once)", re.IGNORECASE
+)
+# The short list of h-words where the h is silent.
+_SILENT_H = {"hour", "hours", "hourly", "honest", "honestly",
+             "heir", "honour", "honor", "honourable", "honorable"}
+
+# A template writes "a <PLACEHOLDER>" without knowing what lands there.
+_TRAILING_ARTICLE = re.compile(r"(?:(?<=\s)|^)([Aa])(\s+)$")
+
+
+def _starts_with_vowel_sound(text):
+    # Leading letter run only, so "hour-long" is judged on "hour".
+    leading = re.match(r"[^\W\d_]+", re.sub(r"^[^\w]+", "", str(text or "")))
+    word = leading.group(0).lower() if leading else ""
+    if not word:
+        return False
+    if word.startswith("h"):
+        return word in _SILENT_H
+    if word[0] not in "aeiou":
+        return False
+    return not _CONSONANT_SOUND_VOWEL.match(word)
+
+
+def _fix_indefinite_article(chunk, value):
+    """Agree a trailing "a"/"an" with the value about to follow it."""
+    match = _TRAILING_ARTICLE.search(chunk)
+    if not match:
+        return chunk
+    article = "an" if _starts_with_vowel_sound(value) else "a"
+    if match.group(1).isupper():
+        article = article.capitalize()
+    return chunk[: match.start(1)] + article + match.group(2)
+
+
+def render_template(template, values):
+    """Substitute <PLACEHOLDER> tokens into a template. Pure.
+
+    Template text passes through untouched apart from indefinite-article
+    agreement, and only the inserted values are Slack-escaped. Substitution is
+    a single pass, so a value that happens to contain a placeholder-shaped
+    string is not expanded again.
+    """
+    def value_for(name):
+        if name not in values:
+            return NOT_AVAILABLE
+        # Pre-rendered bullet blocks are ours, not model prose, so they keep
+        # their newlines and leading bullet characters.
+        if name in ("RECOMMENDATIONS", "PRIORITY-BULLET"):
+            return "\n".join(_esc(line) for line in str(values[name]).split("\n"))
+        return _esc(_clean(values[name], NOT_AVAILABLE))
+
+    out, pos = [], 0
+    for match in PLACEHOLDER_RE.finditer(template or ""):
+        rendered = value_for(match.group(1).strip())
+        out.append(_fix_indefinite_article(template[pos:match.start()], rendered))
+        out.append(rendered)
+        pos = match.end()
+    out.append((template or "")[pos:])
+    return "".join(out).strip()
+
+
+def extract_custom_fields(advisory, markdown_text, placeholders):
+    """Ask the LLM to fill analyst-authored placeholders.
+
+    Raises:
+        Exception on API or parse failure — the caller falls back.
+    """
+    from cost_tracker import cost_tracker
+    from llm_client import call_llm
+
+    advisory = advisory or {}
+    prompt = _CUSTOM_EXTRACTION_PROMPT.format(
+        placeholders="\n".join(f"- {p}" for p in placeholders),
+        template=(advisory.get("_template") or "")[:2000],
+        title=advisory.get("title") or NOT_AVAILABLE,
+        cve_id=advisory.get("cve_id") or NOT_AVAILABLE,
+        technology=advisory.get("technology") or NOT_AVAILABLE,
+        markdown=markdown_text or "(advisory document unavailable)",
+    )
+
+    content, it, ot, cc, cr = call_llm(
+        _CUSTOM_EXTRACTION_SYSTEM,
+        [{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=1200,
+        json_mode=True,
+    )
+    cost_tracker.add_tokens(it, ot, cc, cr)
+
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise ValueError("LLM returned JSON that is not an object")
+    return {k: _clean(v) for k, v in data.items()}
+
+
+def build_from_template(template, advisory, fields, customer_name=None, extra=None):
+    """Render a customer template from known fields. Pure."""
+    values = computed_values(advisory, fields, customer_name)
+    for token, key in _KNOWN_FIELD_TOKENS.items():
+        values.setdefault(
+            token, _clean(fields.get(key), _TOKEN_DEFAULTS.get(token, NOT_AVAILABLE))
+        )
+    for token, value in (extra or {}).items():
+        if value and value != NOT_AVAILABLE:
+            values[token] = value
+        else:
+            values.setdefault(token, NOT_AVAILABLE)
+    return render_template(template, values)
+
+
+# Evoke's approved field block, expressed as a template so every customer runs
+# through one renderer. This reproduces the previous hardcoded output exactly,
+# including the absent blank line before Attachments.
+EVOKE_VULN_TEMPLATE = """*Security Vulnerability Notification*
+
+*Advisory Date:* <ADVISORY-DATE>
+*Vulnerability Name:* <VULNERABILITY-NAME>
+*Vendor / Product:* <VENDOR-PRODUCT>
+*CVE(s):* <CVES>
+*Advisory ID:* <ADVISORY-ID>
+*Severity:* <SEVERITY>
+*Affected Versions:* <AFFECTED-VERSIONS>
+*Fixed Version:* <FIXED-VERSION>
+
+*Description:*
+<DESCRIPTION>
+
+*Recommendations:*
+<RECOMMENDATIONS>
+<PRIORITY-BULLET>
+*Attachments:*
+\u2022 <PDF-FILENAME> \u2014 Security advisory"""
+
+EVOKE_TI_TEMPLATE = """*Threat Intelligence Notification*
+
+*Advisory Date:* <ADVISORY-DATE>
+*Threat Name:* <THREAT-NAME>
+*Vendor / Product:* <VENDOR-PRODUCT>
+*Advisory ID:* <ADVISORY-ID>
+*Severity:* <SEVERITY>
+
+*Description:*
+<DESCRIPTION>
+
+*Recommendations:*
+<RECOMMENDATIONS>
+<PRIORITY-BULLET>
+*Attachments:*
+\u2022 <PDF-FILENAME> \u2014 Security advisory"""
+
+# Fidelidade's covering-note format, supplied by the business.
+FIDELIDADE_VULN_TEMPLATE = """Hello,
+
+We are sharing the attached advisory regarding <CVE-ID> (<VULNERABILITY-NAME>), a <VULNERABILITY-TYPE / SHORT DESCRIPTION> affecting <AFFECTED PRODUCT / COMPONENT> that <BRIEF DESCRIPTION OF HOW THE VULNERABILITY CAN BE TRIGGERED OR EXPLOITED>.
+
+Please review the attached advisory, validating <WHAT SHOULD BE CHECKED / EXPOSURE CONDITION>, and prioritizing <PATCHING / MITIGATION ACTION> for <SYSTEMS OR ASSETS THAT SHOULD RECEIVE PRIORITY>.
+
+[Security Advisory] @SOCIberia_DXC [<SEVERITY>]
+
+Thanks,"""
+
+# Derived from the vulnerability format above, since threat intelligence
+# advisories carry no CVE and no version numbers. Not yet business-confirmed.
+FIDELIDADE_TI_TEMPLATE = """Hello,
+
+We are sharing the attached advisory regarding <THREAT-NAME>, a <THREAT-TYPE / SHORT DESCRIPTION> affecting <AFFECTED PRODUCT / SECTOR> that <BRIEF DESCRIPTION OF HOW THE THREAT IS DELIVERED OR GAINS ACCESS>.
+
+Please review the attached advisory, validating <WHAT SHOULD BE CHECKED / EXPOSURE CONDITION>, and prioritizing <DETECTION OR MITIGATION ACTION> for <SYSTEMS OR ASSETS THAT SHOULD RECEIVE PRIORITY>.
+
+[Security Advisory] @SOCIberia_DXC [<SEVERITY>]
+
+Thanks,"""
+
+_SEEDED_TEMPLATES = {
+    "evoke": (EVOKE_VULN_TEMPLATE, EVOKE_TI_TEMPLATE),
+    "fidelidade": (FIDELIDADE_VULN_TEMPLATE, FIDELIDADE_TI_TEMPLATE),
+}
+
+
+def default_templates_for(customer_name):
+    """Return the (vulnerability, threat intelligence) seed templates.
+
+    Customers without a format of their own start from Evoke's structured
+    block, which is the closest thing to a house default.
+    """
+    return _SEEDED_TEMPLATES.get(
+        (customer_name or "").strip().lower(),
+        (EVOKE_VULN_TEMPLATE, EVOKE_TI_TEMPLATE),
+    )
+
+
+def template_for(customer, advisory):
+    """Pick the customer's template for this advisory kind, or '' if unset."""
+    if not customer:
+        return ""
+    key = "ti_notification_template" if is_threat_intelligence(advisory) else "notification_template"
+    return (customer.get(key) or "").strip()
+
+
+def resolve_customer(advisory):
+    """Look up the customer a given advisory belongs to, or None."""
+    advisory = advisory or {}
+    try:
+        from database import get_customer, get_customer_by_name
+
+        if advisory.get("customer_id"):
+            found = get_customer(advisory["customer_id"])
+            if found:
+                return found
+        return get_customer_by_name(advisory.get("customer_name"))
+    except Exception as e:
+        logger.warning("Could not resolve advisory customer: %s", e)
+        return None
+
+
 def build(advisory, article_url=None, use_llm=True):
     """Build the notification text for an advisory.
 
@@ -381,20 +725,75 @@ def build(advisory, article_url=None, use_llm=True):
     Returns:
         (text, used_llm) tuple.
     """
+    fields, used_llm, markdown_text = prepare_fields(advisory, use_llm)
+    text = build_for_customer(
+        advisory, fields,
+        customer=resolve_customer(advisory),
+        article_url=article_url,
+        markdown_text=markdown_text,
+        use_llm=used_llm,
+    )
+    return text, used_llm
+
+
+def prepare_fields(advisory, use_llm=True):
+    """Extract the notification fields that do not depend on the customer.
+
+    Separated from rendering so one advisory sent to several customers costs a
+    single extraction rather than one per recipient.
+
+    Returns:
+        (fields, used_llm, markdown_text) tuple.
+    """
     fallback = fallback_fields(advisory)
-    fields, used_llm = fallback, False
+    fields, used_llm, markdown_text = fallback, False, ""
 
     if use_llm:
         try:
             from llm_client import has_api_key
 
             if has_api_key():
-                extracted = extract_fields(advisory, read_advisory_markdown(advisory))
-                fields = merge_fields(extracted, fallback)
+                markdown_text = read_advisory_markdown(advisory)
+                fields = merge_fields(extract_fields(advisory, markdown_text), fallback)
                 used_llm = True
             else:
                 logger.info("No LLM key configured; notification uses advisory metadata only")
         except Exception as e:
             logger.warning("Notification field extraction failed, using fallback: %s", e)
 
-    return render(fields, advisory, article_url), used_llm
+    return fields, used_llm, markdown_text
+
+
+def build_for_customer(advisory, fields, customer=None, article_url=None,
+                       markdown_text="", use_llm=True):
+    """Render the notification in one customer's approved format.
+
+    Customers without a format of their own get the standard field block.
+    """
+    template = template_for(customer, advisory)
+    if not template:
+        return render(fields, advisory, article_url)
+
+    # Only placeholders the shared extraction does not already cover are worth
+    # a second call, and only when the first one succeeded.
+    unknown = [
+        t for t in extract_placeholders(template)
+        if t not in COMPUTED_TOKENS and t not in _KNOWN_FIELD_TOKENS
+    ]
+    extra = {}
+    if unknown and use_llm:
+        try:
+            extra = extract_custom_fields(
+                {**advisory, "_template": template}, markdown_text, unknown
+            )
+        except Exception as e:
+            logger.warning("Custom placeholder fill failed, using N/A: %s", e)
+
+    text = build_from_template(
+        template, advisory, fields,
+        customer_name=(customer or {}).get("name"),
+        extra=extra,
+    )
+    if article_url:
+        text += f"\n\n*Source:* <{_esc(article_url)}>"
+    return text

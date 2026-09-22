@@ -16,7 +16,7 @@ AI-powered threat news analysis platform — aggregation, summarization, and for
 - **Emerging Threats** — Threat Intelligence + Vulnerabilities queues with **triage**
 - **Advisories** — SQLite tracks that an advisory was made; PDFs via sibling `scriba/`
 - **APT / MISP** — consolidated groups + IOC export
-- **LLM providers** — OpenAI, Anthropic, or OpenRouter
+- **LLM providers** — OpenAI, Anthropic, OpenRouter, or Gemini
 
 ## Features
 
@@ -35,7 +35,7 @@ AI-powered threat news analysis platform — aggregation, summarization, and for
 ## Requirements
 
 - Python 3.10+
-- OpenAI API key (for summarization, embeddings, and intelligence search) **or** Anthropic API key (for summarization only; embeddings still require OpenAI)
+- An API key for one of OpenAI, Gemini, Anthropic or OpenRouter. OpenAI and Gemini cover summarization and embeddings on a single key; Anthropic and OpenRouter cover summarization only and need an additional OpenAI key for embeddings.
 - Malpedia API key (optional, for research article ingestion)
 
 ## Quick Start
@@ -168,7 +168,7 @@ API keys and server settings can be configured via environment variables, which 
 
 > **Report Token (optional):** Set `report_token` in `config.json` or via the Android app Settings → Reporting section to require a token when submitting LLM output reports via `POST /api/report`.
 
-> Embeddings for semantic search always use OpenAI (`text-embedding-3-small`). An OpenAI key is required even when using Anthropic for summarization.
+> Embeddings follow the selected provider: OpenAI uses `text-embedding-3-small`, Gemini uses `gemini-embedding-001`. Anthropic and OpenRouter have no embeddings endpoint, so they fall back to OpenAI and need a separate OpenAI key for semantic search, RAG chat and digest clustering.
 
 ### Adding feeds
 
@@ -208,7 +208,7 @@ All feeds are enabled by default. Disable any by setting `"enabled": false` in `
 | `claude-sonnet-4-6` | Higher quality summaries and insights |
 | `claude-opus-4-6` | Highest quality, complex analysis |
 
-Embeddings always use `text-embedding-3-small` (1536 dimensions) regardless of provider.
+Embeddings follow the selected provider: `text-embedding-3-small` (1536 dimensions) for OpenAI, Anthropic and OpenRouter, and `gemini-embedding-001` for Gemini. Stored vectors record which model produced them, and similarity is only ever computed within a single model, so switching provider re-embeds the backlog rather than comparing incompatible vectors.
 
 ## How It Works
 

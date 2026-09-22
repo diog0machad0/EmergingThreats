@@ -16,22 +16,52 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMS = 1536
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
+
+# Anthropic and OpenRouter expose no embeddings endpoint, so they borrow
+# OpenAI's and the Settings page asks them for a separate OpenAI key.
 
 
-def _get_client():
-    """Create an OpenAI client using the configured API key.
+def get_embedding_model():
+    """Return the embedding model name for the active provider.
+
+    Stored vectors are keyed by this name, and comparisons are only ever made
+    within one model, because vectors from different models are not comparable.
+    """
+    from llm_client import get_provider
+
+    if get_provider() == "gemini":
+        return GEMINI_EMBEDDING_MODEL
+    return OPENAI_EMBEDDING_MODEL
+
+
+def _get_backend():
+    """Resolve the embedding client and model for the active provider.
+
+    Gemini embeds through Google's OpenAI-compatible endpoint, so both paths use
+    the same client class and differ only in key and base URL.
 
     Returns:
-        An ``OpenAI`` client instance, or None if no API key is configured.
+        Tuple of (client_or_None, model_name).
     """
+    from openai import OpenAI
+
+    from llm_client import GEMINI_BASE_URL, get_provider
+
     config = load_config()
+    provider = get_provider()
+
+    if provider == "gemini":
+        api_key = config.get("gemini_api_key", "").strip()
+        if not api_key:
+            return None, GEMINI_EMBEDDING_MODEL
+        return OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL), GEMINI_EMBEDDING_MODEL
+
     api_key = config.get("openai_api_key", "").strip()
     if not api_key:
-        return None
-    from openai import OpenAI
-    return OpenAI(api_key=api_key)
+        return None, OPENAI_EMBEDDING_MODEL
+    return OpenAI(api_key=api_key), OPENAI_EMBEDDING_MODEL
 
 
 def _floats_to_blob(floats):
@@ -59,7 +89,7 @@ def _blob_to_array(blob):
 
 
 def generate_embeddings_batch(texts):
-    """Generate embeddings for a batch of texts via the OpenAI API.
+    """Generate embeddings for a batch of texts using the active provider.
 
     Retries up to 3 times on rate limits or API errors.
 
@@ -67,21 +97,23 @@ def generate_embeddings_batch(texts):
         texts: List of text strings to embed.
 
     Returns:
-        List of float lists (one embedding per input text), or None if
-        the API key is missing or all retries fail.
+        Tuple of (list of float lists, model_name). The list is None if the
+        API key is missing or all retries fail.
     """
-    client = _get_client()
+    client, model = _get_backend()
     if client is None:
-        logger.warning("OpenAI API key not configured, skipping embedding generation")
-        return None
+        logger.warning(
+            "No API key configured for %s embeddings, skipping generation", model
+        )
+        return None, model
 
     for attempt in range(3):
         try:
             response = client.embeddings.create(
-                model=EMBEDDING_MODEL,
+                model=model,
                 input=texts,
             )
-            return [item.embedding for item in response.data]
+            return [item.embedding for item in response.data], model
         except RateLimitError:
             wait = 2 ** (attempt + 1)
             logger.warning(f"Rate limited, waiting {wait}s before retry")
@@ -92,9 +124,9 @@ def generate_embeddings_batch(texts):
                 time.sleep(1)
         except Exception as e:
             logger.error(f"Unexpected error during embedding generation: {e}")
-            return None
+            return None, model
 
-    return None
+    return None, model
 
 
 def embed_pending_articles(limit=50, article_ids=None):
@@ -111,7 +143,11 @@ def embed_pending_articles(limit=50, article_ids=None):
     Returns:
         Total number of articles processed (0 means nothing left).
     """
-    articles = get_unembedded_articles(limit=limit, article_ids=article_ids)
+    # Scoped to the active model, so switching provider re-embeds rather than
+    # leaving articles carrying vectors the new model cannot be compared against.
+    articles = get_unembedded_articles(
+        limit=limit, article_ids=article_ids, model_used=get_embedding_model()
+    )
     if not articles:
         return 0
 
@@ -122,7 +158,7 @@ def embed_pending_articles(limit=50, article_ids=None):
         summary = art["summary_text"] or ""
         texts.append(f"{title}\n{summary}")
 
-    embeddings = generate_embeddings_batch(texts)
+    embeddings, model = generate_embeddings_batch(texts)
     if embeddings is None:
         return 0
 
@@ -130,7 +166,7 @@ def embed_pending_articles(limit=50, article_ids=None):
     for art, emb in zip(articles, embeddings):
         try:
             blob = _floats_to_blob(emb)
-            save_embedding(art["id"], blob, EMBEDDING_MODEL)
+            save_embedding(art["id"], blob, model)
             stored += 1
         except Exception as e:
             logger.error(f"Failed to save embedding for article {art['id']}: {e}")
@@ -139,7 +175,32 @@ def embed_pending_articles(limit=50, article_ids=None):
     return len(articles)
 
 
-def cluster_articles_by_similarity(articles, threshold=0.82):
+# Cosine similarity is not comparable across embedding models, so the merge
+# threshold has to follow whichever model produced the vectors.
+#
+# OpenAI text-embedding-3-* put unrelated articles near 0.1-0.3 and same-story
+# duplicates above 0.85, leaving 0.82 sitting in a wide empty gap.
+#
+# gemini-embedding-001 has a much higher floor. Measured on a real 12-article
+# run, distinct stories spanned 0.633-0.820, while the same story rewritten by
+# three outlets scored 0.810, 0.871 and 0.879. The two distributions touch, so
+# no threshold is perfect, but 0.82 is the worst available choice: it lands
+# exactly on the distinct-story ceiling. 0.85 clears every distinct pair seen
+# and still catches typical duplicates, trading only the most heavily reworded
+# ones for not merging unrelated stories.
+CLUSTER_THRESHOLDS = {
+    "gemini-embedding-001": 0.85,
+}
+DEFAULT_CLUSTER_THRESHOLD = 0.82
+
+
+def get_clustering_threshold(model=None):
+    """Return the story-clustering cosine threshold for an embedding model."""
+    return CLUSTER_THRESHOLDS.get(model or get_embedding_model(),
+                                  DEFAULT_CLUSTER_THRESHOLD)
+
+
+def cluster_articles_by_similarity(articles, threshold=None):
     """Group articles into story clusters using greedy centroid-based cosine similarity.
 
     Articles without an embedding blob are placed in their own singleton cluster.
@@ -148,10 +209,14 @@ def cluster_articles_by_similarity(articles, threshold=0.82):
         articles: List of article dicts, each containing an ``embedding`` key
             with raw float32 bytes (as returned by ``get_articles_with_embeddings_since``).
         threshold: Cosine similarity threshold for merging into an existing cluster.
+            Defaults to the value calibrated for the active embedding model.
 
     Returns:
         List of clusters, where each cluster is a list of article dicts.
     """
+    if threshold is None:
+        threshold = get_clustering_threshold()
+
     clusters = []        # list of lists of article dicts
     centroids = []       # list of numpy arrays (mean embedding per cluster)
 
@@ -214,14 +279,14 @@ def semantic_search(query, top_k=15, since_days=None):
         float (0.0--1.0). Returns an empty list if no API key is
         configured or no embeddings exist.
     """
-    client = _get_client()
+    client, model = _get_backend()
     if client is None:
         return []
 
     # Embed the query
     try:
         response = client.embeddings.create(
-            model=EMBEDDING_MODEL,
+            model=model,
             input=[query],
         )
         query_embedding = np.array(response.data[0].embedding, dtype=np.float32)
@@ -230,12 +295,12 @@ def semantic_search(query, top_k=15, since_days=None):
         return []
 
     # Load all stored embeddings, optionally filtered by time period
-    all_embs = get_all_embeddings(model_used=EMBEDDING_MODEL)
+    all_embs = get_all_embeddings(model_used=model)
     if not all_embs:
         return []
 
     if since_days is not None:
-        allowed_ids = get_article_ids_since_days(since_days, model_used=EMBEDDING_MODEL)
+        allowed_ids = get_article_ids_since_days(since_days, model_used=model)
         all_embs = [e for e in all_embs if e["article_id"] in allowed_ids]
         if not all_embs:
             return []
@@ -247,7 +312,9 @@ def semantic_search(query, top_k=15, since_days=None):
         article_ids.append(row["article_id"])
         matrix_rows.append(_blob_to_array(row["embedding"]))
 
-    matrix = np.vstack(matrix_rows)  # shape: (N, 1536)
+    # Rows are all from one model, so their width is consistent even though it
+    # differs between models (1536 for OpenAI, 3072 for Gemini).
+    matrix = np.vstack(matrix_rows)
 
     # Cosine similarity: dot(q, M^T) / (|q| * |M_rows|)
     query_norm = np.linalg.norm(query_embedding)

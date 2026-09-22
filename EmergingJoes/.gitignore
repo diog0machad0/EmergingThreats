@@ -12,12 +12,10 @@ __pycache__/
 # Application data (secrets, database)
 data/config.json
 config.json
-data/*.db
-data/*.db-shm
-data/*.db-wal
-*.db
-*.db-shm
-*.db-wal
+# Trailing wildcard so sidecars and hand-made copies are covered too:
+# "*.db" alone misses .db-wal, .db-shm and .db.bak, which carry the same
+# customer data as the database itself.
+*.db*
 
 # Generated docs site
 site/

@@ -73,7 +73,7 @@ def generate_advisory_markdown(cve_id, article_title, article_content, matched_t
     if not has_api_key():
         raise RuntimeError(
             "LLM API key required to generate advisories "
-            "(configure OpenAI, Anthropic, or OpenRouter in Settings)"
+            "(configure OpenAI, Anthropic, OpenRouter, or Gemini in Settings)"
         )
 
     if not SAMPLE_ADVISORY.is_file():
@@ -124,7 +124,7 @@ def generate_threat_intelligence_markdown(
     if not has_api_key():
         raise RuntimeError(
             "LLM API key required to generate advisories "
-            "(configure OpenAI, Anthropic, or OpenRouter in Settings)"
+            "(configure OpenAI, Anthropic, OpenRouter, or Gemini in Settings)"
         )
 
     if not SAMPLE_ADVISORY.is_file():

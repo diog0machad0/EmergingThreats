@@ -4,12 +4,27 @@ Module: `slack_client.py`. Page: `/emerging-threats` (Vulnerabilities, Threat In
 
 ## Behavior
 
-1. The analyst opens a vulnerability or TI match and picks target channels in the create-advisory block.
+1. The analyst opens a vulnerability or TI match and picks **which customers to notify** in the create-advisory block. The customer the match belongs to is pre-ticked.
 2. The advisory is generated as usual (LLM markdown → Scriba PDF, tracked in `advisories`).
-3. `POST /api/advisories/<id>/distribute` uploads the PDF to each selected channel with a crafted mrkdwn message as its `initial_comment`.
-4. Every channel attempt is written to `advisory_distributions` with `sent` or `failed` plus the error, so "was this already sent, and where" survives closing the modal.
+3. `POST /api/advisories/<id>/distribute` with `{"customers": [id, ...]}` renders that customer's approved message and uploads the PDF to that customer's channels as an `initial_comment`.
+4. Every channel attempt is written to `advisory_distributions` with `sent` or `failed`, the error, **and the customer it was sent for**, so "was this already sent, and to whom" survives closing the modal.
 
 Already-generated advisories can be re-sent from the **Send to Slack** action on each card in the Advisories tab, which calls the same endpoint.
+
+### Why customers, not channels
+
+Channels used to be selected directly. That stopped working once formats became
+per-customer: a channel id says where to post but nothing about which wording
+belongs there, and two customers selected at once need two different messages.
+Choosing the customer determines both the destination and the format.
+
+One advisory sent to several customers therefore produces several distinct
+messages. The field extraction behind them runs **once** — it reads the advisory,
+not the customer — so an extra recipient costs at most one small follow-up call
+for free-text placeholders, and nothing for a customer whose format has none.
+
+A bare `{"channels": [...]}` body is still accepted for direct sends, and a
+request with neither falls back to the advisory's own customer.
 
 ## Why the PDF is attached rather than linked
 
@@ -54,9 +69,30 @@ This roll-up is **analyst-only and is not put in the Slack message**. Channels a
 
 This matters because the queue is article-scoped: the same CVE routinely appears in several articles and matches different customers in each, so a single modal understates real exposure.
 
+## Channel routing
+
+Each customer carries its own destinations in `customers.slack_channels`, set on
+the Customers page from a picker backed by `GET /api/slack/channels`. Evoke goes
+to `#evoke-threatintel`, Fidelidade to `#fidelidade-threatintel`.
+
+`GET /api/advisories/<id>/channels` returns the configured channels for an
+advisory's customer so the send dialog can pre-tick them. The analyst can still
+change the selection; if a distribute call arrives with no channels at all, the
+customer's configured list is used rather than failing.
+
+A channel is stored as `{"id", "name"}`. The id is what `files_upload_v2`
+addresses, but seeded and hand-typed channels start with only a name, so ids are
+resolved against the workspace listing at send time. A name that resolves to
+nothing is reported as a failed channel rather than silently dropped.
+
 ## The notification message
 
-`advisory_notification.py` owns the message format. The approved template is stored verbatim as `NOTIFICATION_TEMPLATE` in that module, which is the source of truth:
+Customers do not share a message format, so `advisory_notification.py` renders
+whichever template is stored on the customer row. `GET`-ing a preview before
+sending is possible via `POST /api/advisories/<id>/message-preview`.
+
+Evoke's approved field block is the seed default, also used for any customer
+with no format of its own:
 
 ```
 Security Vulnerability Notification
@@ -105,6 +141,44 @@ Attachments:
 
 Selection is driven by the advisory's `kind` column, and each variant has its own extraction prompt — the TI one asks for detection and hunting actions rather than patch versions. `Advisory ID` is retained because CERT and government bulletins (for example `AA24-109A`) often do carry one.
 
+### Per-customer formats
+
+Fidelidade uses a prose covering note instead of the field block:
+
+```
+Hello,
+
+We are sharing the attached advisory regarding <CVE-ID> (<VULNERABILITY-NAME>), a <VULNERABILITY-TYPE / SHORT DESCRIPTION> affecting <AFFECTED PRODUCT / COMPONENT> that <BRIEF DESCRIPTION OF HOW THE VULNERABILITY CAN BE TRIGGERED OR EXPLOITED>.
+
+Please review the attached advisory, validating <WHAT SHOULD BE CHECKED / EXPOSURE CONDITION>, and prioritizing <PATCHING / MITIGATION ACTION> for <SYSTEMS OR ASSETS THAT SHOULD RECEIVE PRIORITY>.
+
+[Security Advisory] @SOCIberia_DXC [<SEVERITY>]
+
+Thanks,
+```
+
+Templates are Slack mrkdwn written by the analyst and emitted **verbatim**, so
+the `@SOCIberia_DXC` mention and the `[Security Advisory]` tag line survive.
+Only substituted values are escaped.
+
+Placeholders are `<UPPERCASE>` tokens and fall into three groups:
+
+| Group | Filled by | Examples |
+|---|---|---|
+| Computed | Code, never the model | `<CVE-ID>`, `<SEVERITY>`, `<ADVISORY-DATE>`, `<PDF-FILENAME>`, `<RECOMMENDATIONS>`, `<PRIORITY-BULLET>`, `<REMEDIATION-DATE>` |
+| Known fields | The standard extraction call | `<VULNERABILITY-NAME>`, `<VENDOR-PRODUCT>`, `<ADVISORY-ID>`, `<AFFECTED-VERSIONS>`, `<FIXED-VERSION>`, `<DESCRIPTION>` |
+| Analyst-authored | A second extraction call | `<WHAT SHOULD BE CHECKED / EXPOSURE CONDITION>` and anything else invented |
+
+The placeholder name is the only instruction the model gets for the third
+group, so descriptive names produce better output than terse ones. The whole
+template is passed as context so each value reads correctly in its sentence.
+Anything the advisory does not state becomes `N/A`. The second call is skipped
+when a template uses no analyst-authored tokens, so Evoke's format still costs
+exactly one LLM call.
+
+Evoke's templated output is byte-for-byte identical to the previous hardcoded
+rendering; that equivalence is worth re-checking if the renderer changes.
+
 ### Why the LLM only fills fields
 
 `extract_fields()` asks the model for a JSON object of field *values*; `render()` lays them out in code. Handing the model the whole template invites renamed, reordered, or silently dropped lines, and this is a client-facing deliverable with a fixed shape. It also makes `render()` a pure function, testable with no API key.
@@ -123,8 +197,10 @@ The extractor reads the generated advisory markdown (`markdown_path`), not the s
 
 ## Notes for agents
 
-- `advisory_notification.render()` is pure — no network, no config, no file reads — so message layout is testable without a workspace or an API key. `build_advisory_message()` wraps it and may call the LLM.
-- The notification is built once per distribution, before the channel loop, so a five-channel send costs one LLM call rather than five.
+- `advisory_notification.render()` and `render_template()` are pure — no network, no config, no file reads — so message layout is testable without a workspace or an API key. `build_advisory_message()` wraps them and may call the LLM.
+- `prepare_fields()` is customer-independent and `build_for_customer()` is not. Keep that split: collapsing them would re-extract the advisory once per recipient.
+- The notification is built once per **customer**, not once per channel, so a customer with three channels still costs one render.
+- `render_template()` corrects `a`/`an` against the value that follows, because a template writes "a &lt;PLACEHOLDER&gt;" without knowing what lands there. Without it, messages read "a unauthenticated remote code execution flaw".
 - `distribute_advisory()` never raises for a per-channel failure. It returns one result dict per channel, matching how `apt_ioc_processor` records `status` / `error_message` instead of failing the pipeline. One archived or bot-less channel must not block delivery to the rest.
 - Distribution is a separate endpoint from advisory creation. A Slack outage then costs you a delivery, not a generated advisory.
 - `files_upload_v2` targets a single channel per call, hence the loop rather than a comma-joined channel list.

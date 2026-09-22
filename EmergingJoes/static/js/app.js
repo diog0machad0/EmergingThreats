@@ -1114,6 +1114,11 @@ function dismissInsightActual() {
 }
 
 // === Settings ===
+// Anthropic and OpenRouter have no embeddings endpoint, so they need a separate
+// OpenAI key before semantic search, RAG chat and digest clustering will work.
+// OpenAI and Gemini embed with the key already entered for chat.
+const PROVIDERS_NEEDING_EMBED_KEY = ['anthropic', 'openrouter'];
+
 function switchProvider(provider) {
     document.getElementById('llm-provider').value = provider;
     document.querySelectorAll('.provider-btn').forEach(btn => {
@@ -1125,9 +1130,14 @@ function switchProvider(provider) {
     if (openrouterSection) {
         openrouterSection.style.display = provider === 'openrouter' ? '' : 'none';
     }
+    const geminiSection = document.getElementById('gemini-section');
+    if (geminiSection) {
+        geminiSection.style.display = provider === 'gemini' ? '' : 'none';
+        if (provider === 'gemini') refreshGeminiModels(false);
+    }
     const embedSection = document.getElementById('embed-key-section');
     if (embedSection) {
-        embedSection.style.display = (provider === 'anthropic' || provider === 'openrouter') ? '' : 'none';
+        embedSection.style.display = PROVIDERS_NEEDING_EMBED_KEY.includes(provider) ? '' : 'none';
     }
 }
 
@@ -1138,6 +1148,8 @@ function saveSettings() {
     const anthropicModel = document.getElementById('anthropic-model-select');
     const openrouterKey = document.getElementById('openrouter-key');
     const openrouterModel = document.getElementById('openrouter-model-select');
+    const geminiKey = document.getElementById('gemini-key');
+    const geminiModel = document.getElementById('gemini-model-select');
     const llmProvider = document.getElementById('llm-provider');
     const interval = document.getElementById('fetch-interval');
     const status = document.getElementById('save-status');
@@ -1169,7 +1181,7 @@ function saveSettings() {
 
     const provider = llmProvider ? llmProvider.value : 'openai';
     const embedApiKey = document.getElementById('embed-api-key');
-    const effectiveOpenAiKey = (provider === 'anthropic' || provider === 'openrouter')
+    const effectiveOpenAiKey = PROVIDERS_NEEDING_EMBED_KEY.includes(provider)
         ? (embedApiKey ? embedApiKey.value : '')
         : (apiKey ? apiKey.value : '');
 
@@ -1181,6 +1193,8 @@ function saveSettings() {
         anthropic_model: anthropicModel ? anthropicModel.value : 'claude-haiku-4-5-20251001',
         openrouter_api_key: openrouterKey ? openrouterKey.value : '',
         openrouter_model: openrouterModel ? openrouterModel.value : 'meta-llama/llama-3.3-70b-instruct:free',
+        gemini_api_key: geminiKey ? geminiKey.value : '',
+        gemini_model: geminiModel ? geminiModel.value : 'gemini-flash-lite-latest',
         malpedia_api_key: malpediaKey ? malpediaKey.value : '',
         fetch_interval_minutes: interval ? parseInt(interval.value) : 30,
         feeds: feeds,
@@ -1568,6 +1582,109 @@ async function testOpenRouterKey() {
             status.textContent = 'Invalid API key: ' + (data.error || 'Unknown error');
             status.className = 'form-hint error';
         }
+    } catch (e) {
+        if (status) {
+            status.textContent = 'Test failed: ' + e.message;
+            status.className = 'form-hint error';
+        }
+    }
+}
+
+// Google retires model ids on its own schedule, so rather than trusting the
+// hardcoded <option> list, ask the key what it can actually reach.
+async function refreshGeminiModels(showStatus) {
+    const keyInput = document.getElementById('gemini-key');
+    const select = document.getElementById('gemini-model-select');
+    const status = document.getElementById('gemini-model-status');
+    if (!select) return;
+
+    const key = keyInput ? keyInput.value.trim() : '';
+    if (!key) return;
+
+    if (showStatus && status) {
+        status.textContent = 'Loading available models...';
+        status.className = 'form-hint';
+    }
+
+    try {
+        const res = await fetch('/api/gemini-models', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_key: key }),
+        });
+        const data = await res.json();
+        if (!data.models || !data.models.length) {
+            if (status) {
+                status.textContent = data.error
+                    ? 'Could not list models: ' + data.error
+                    : 'No chat models available on this key.';
+                status.className = 'form-hint error';
+            }
+            return;
+        }
+
+        // Keep the saved selection if the account still offers it.
+        const previous = select.value;
+        select.innerHTML = '';
+        data.models.forEach(id => {
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = id + (id.includes('lite') ? ' (largest free allowance)' : '');
+            select.appendChild(opt);
+        });
+        select.value = data.models.includes(previous) ? previous : data.models[0];
+
+        if (status) {
+            const kept = select.value === previous;
+            status.textContent = `${data.models.length} models available on this key`
+                + (kept ? '.' : `. Previous choice "${previous}" is gone, selected "${select.value}".`);
+            status.className = kept ? 'form-hint success' : 'form-hint error';
+        }
+    } catch (e) {
+        if (status) {
+            status.textContent = 'Could not list models: ' + e.message;
+            status.className = 'form-hint error';
+        }
+    }
+}
+
+async function testGeminiKey() {
+    const keyInput = document.getElementById('gemini-key');
+    const modelSelect = document.getElementById('gemini-model-select');
+    const status = document.getElementById('gemini-key-status');
+    const key = keyInput ? keyInput.value.trim() : '';
+    const model = modelSelect ? modelSelect.value : '';
+
+    if (!key) {
+        if (status) {
+            status.textContent = 'Please enter an API key';
+            status.className = 'form-hint error';
+        }
+        return;
+    }
+
+    if (status) {
+        status.textContent = 'Testing...';
+        status.className = 'form-hint';
+    }
+
+    try {
+        const res = await fetch('/api/test-gemini-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_key: key, model }),
+        });
+        const data = await res.json();
+        if (data.valid) {
+            status.textContent = 'API key is valid! Remember to click Save Settings.';
+            status.className = 'form-hint success';
+        } else {
+            status.textContent = 'Invalid API key: ' + (data.error || 'Unknown error');
+            status.className = 'form-hint error';
+        }
+        // Whether or not this model worked, refresh the list so a retired id
+        // is replaced rather than left selected.
+        refreshGeminiModels(true);
     } catch (e) {
         if (status) {
             status.textContent = 'Test failed: ' + e.message;

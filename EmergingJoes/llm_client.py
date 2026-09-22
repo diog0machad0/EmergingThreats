@@ -1,4 +1,4 @@
-"""Provider-aware LLM client abstraction supporting OpenAI, Anthropic, and OpenRouter."""
+"""Provider-aware LLM client abstraction supporting OpenAI, Anthropic, OpenRouter and Gemini."""
 
 import logging
 
@@ -6,18 +6,29 @@ from config import load_config
 
 logger = logging.getLogger(__name__)
 
+SUPPORTED_PROVIDERS = ("openai", "anthropic", "openrouter", "gemini")
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Pin a concrete model rather than the "openrouter/free" router alias: the
 # alias resolves to an arbitrary free model per call, including reasoning
 # models whose chain-of-thought breaks the JSON the summarizer expects.
 OPENROUTER_DEFAULT_MODEL = "google/gemma-4-31b-it:free"
 
+# Google exposes an OpenAI-compatible surface for the Gemini API, so Gemini
+# reuses the shared chat-completions path instead of pulling in google-genai.
+# The trailing slash and the /openai/ segment are both required.
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+# The "-latest" alias, not a pinned version: Google retires concrete ids while
+# still listing them, and a retired id 404s only at call time. The alias always
+# resolves to the current Flash-Lite, which is the cheapest free-tier family.
+GEMINI_DEFAULT_MODEL = "gemini-flash-lite-latest"
+
 
 def get_provider():
-    """Return the active LLM provider name (openai|anthropic|openrouter)."""
+    """Return the active LLM provider name (openai|anthropic|openrouter|gemini)."""
     config = load_config()
     provider = (config.get("llm_provider") or "openai").strip().lower()
-    if provider not in ("openai", "anthropic", "openrouter"):
+    if provider not in SUPPORTED_PROVIDERS:
         return "openai"
     return provider
 
@@ -30,6 +41,8 @@ def has_api_key():
         return bool(config.get("anthropic_api_key", "").strip())
     if provider == "openrouter":
         return bool(config.get("openrouter_api_key", "").strip())
+    if provider == "gemini":
+        return bool(config.get("gemini_api_key", "").strip())
     return bool(config.get("openai_api_key", "").strip())
 
 
@@ -41,6 +54,8 @@ def get_model_name():
         return config.get("anthropic_model", "claude-haiku-4-5-20251001")
     if provider == "openrouter":
         return config.get("openrouter_model", OPENROUTER_DEFAULT_MODEL)
+    if provider == "gemini":
+        return config.get("gemini_model", GEMINI_DEFAULT_MODEL)
     return config.get("openai_model", "gpt-4.1-mini")
 
 
@@ -74,21 +89,32 @@ def call_llm(system_prompt, messages, temperature=0.3, max_tokens=2000,
     if provider == "openrouter":
         return _call_openrouter(system_prompt, messages, temperature, max_tokens,
                                 json_mode, config, system_blocks=system_blocks)
+    if provider == "gemini":
+        return _call_gemini(system_prompt, messages, temperature, max_tokens,
+                            json_mode, config, system_blocks=system_blocks)
     return _call_openai(system_prompt, messages, temperature, max_tokens,
                         json_mode, config, system_blocks=system_blocks)
 
 
-def _is_quota_or_auth_error(exc):
-    """True for failures that dropping JSON mode cannot possibly fix."""
+def _is_unretryable_error(exc):
+    """True for failures that dropping JSON mode cannot possibly fix.
+
+    Covers auth and quota, plus a missing model (404) and an overloaded
+    backend (503). Retrying those burns a second request for nothing, and on a
+    free tier the failed attempt still counts against the daily allowance.
+    """
     status = getattr(exc, "status_code", None) or getattr(
         getattr(exc, "response", None), "status_code", None
     )
-    if status in (401, 402, 403, 429):
+    if status in (401, 402, 403, 404, 429, 503):
         return True
     msg = str(exc).lower()
     return any(
         marker in msg
-        for marker in ("rate limit", "429", "quota", "insufficient", "unauthorized")
+        for marker in (
+            "rate limit", "429", "quota", "insufficient", "unauthorized",
+            "not_found", "no longer available", "unavailable", "high demand",
+        )
     )
 
 
@@ -102,8 +128,12 @@ def _resolve_system_text(system_prompt, system_blocks):
 
 def _openai_compatible_call(api_key, model, base_url, system_prompt, messages,
                             temperature, max_tokens, json_mode, system_blocks=None,
-                            extra_headers=None):
-    """Shared OpenAI-compatible chat completion path (OpenAI + OpenRouter)."""
+                            extra_headers=None, extra_params=None):
+    """Shared OpenAI-compatible chat completion path (OpenAI, OpenRouter, Gemini).
+
+    ``extra_params`` carries provider-specific request fields (Gemini's
+    ``reasoning_effort``, for example) straight through to the create() call.
+    """
     from openai import OpenAI
 
     client_kwargs = {"api_key": api_key}
@@ -138,6 +168,8 @@ def _openai_compatible_call(api_key, model, base_url, system_prompt, messages,
         }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
+    if extra_params:
+        kwargs.update(extra_params)
 
     try:
         resp = client.chat.completions.create(**kwargs)
@@ -145,7 +177,7 @@ def _openai_compatible_call(api_key, model, base_url, system_prompt, messages,
         # Some OpenRouter free models reject response_format=json_object.
         # Rate-limit and auth failures must not trigger this fallback: the
         # retry would fail identically while consuming a second request.
-        if json_mode and "response_format" in kwargs and not _is_quota_or_auth_error(e):
+        if json_mode and "response_format" in kwargs and not _is_unretryable_error(e):
             logger.warning("JSON mode unsupported for %s (%s); retrying without it", model, e)
             kwargs.pop("response_format", None)
             if all_messages and all_messages[0]["role"] == "system":
@@ -203,6 +235,37 @@ def _call_openrouter(system_prompt, messages, temperature, max_tokens, json_mode
             "HTTP-Referer": "https://joes.local",
             "X-Title": "JOES Threat Intelligence",
         },
+    )
+
+
+def _gemini_thinking_params(model):
+    """Keep Gemini's thinking tokens from eating the answer.
+
+    Thinking output is billed and counted against max_tokens, so an unbounded
+    thinking budget truncates the JSON the summarizer expects. Thinking can be
+    switched off entirely on 2.5, but only turned down on 3.x, so those models
+    also get extra output headroom.
+    """
+    family_2_5 = "2.5" in model
+    return {"reasoning_effort": "none" if family_2_5 else "low"}, 1 if family_2_5 else 2
+
+
+def _call_gemini(system_prompt, messages, temperature, max_tokens, json_mode,
+                 config, system_blocks=None):
+    api_key = config.get("gemini_api_key", "").strip()
+    model = config.get("gemini_model", GEMINI_DEFAULT_MODEL)
+    extra_params, token_headroom = _gemini_thinking_params(model)
+    return _openai_compatible_call(
+        api_key,
+        model,
+        GEMINI_BASE_URL,
+        system_prompt,
+        messages,
+        temperature,
+        max_tokens * token_headroom,
+        json_mode,
+        system_blocks=system_blocks,
+        extra_params=extra_params,
     )
 
 

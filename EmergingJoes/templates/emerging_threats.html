@@ -531,6 +531,8 @@ async function openTiModal(articleId) {
         const item = await res.json();
         await ensureSlackChannels();
         body.innerHTML = renderTiModalContent(item);
+        (item.hits || []).forEach((_hit, idx) =>
+            markAlreadySent(`ti-slack-channels-${idx}`, { articleId: item.article_id }));
     } catch (e) {
         body.innerHTML = '<p class="vuln-modal-error">Failed to load threat intelligence details.</p>';
     }
@@ -560,7 +562,7 @@ function renderTiModalContent(item) {
             ${(hit.matched_tech && hit.matched_tech.length) ? `<p class="threat-matched-tech"><strong>Matched tech:</strong> ${hit.matched_tech.map(t => escHtml(t)).join(', ')}</p>` : ''}
             ${(hit.matched_affiliates && hit.matched_affiliates.length) ? `<p class="threat-matched-aff"><strong>Matched affiliates:</strong> ${hit.matched_affiliates.map(a => escHtml(a)).join(', ')}</p>` : ''}
             ${hit.distribution_outlook ? `<p class="threat-outlook"><strong>Adversary movement:</strong> ${escHtml(hit.distribution_outlook)}</p>` : ''}
-            ${renderChannelPicker(`ti-slack-channels-${idx}`, idx === 0)}
+            ${renderCustomerPicker(`ti-slack-channels-${idx}`, hit.customer_id, idx === 0)}
             <div class="vuln-advisory-actions">
                 <button class="btn btn-primary btn-sm" id="ti-advisory-btn-${idx}"
                     onclick="createTiAdvisory(${item.article_id}, ${hit.customer_id || 'null'}, '${escAttr(hit.customer_name || '')}', ${idx})">
@@ -648,6 +650,8 @@ async function openVulnModal(articleId) {
         await ensureSlackChannels();
         body.innerHTML = renderVulnModalContent(item);
         loadCveRollups(item);
+        (item.hits || []).forEach((hit, idx) =>
+            markAlreadySent(`vuln-slack-channels-${idx}`, { cveId: hit.cve_id }));
     } catch (e) {
         body.innerHTML = '<p class="vuln-modal-error">Failed to load vulnerability details.</p>';
     }
@@ -673,7 +677,7 @@ function renderVulnModalContent(item) {
             </div>
             ${hit.match_evidence ? `<p class="threat-evidence">${escHtml(hit.match_evidence)}</p>` : ''}
             <p class="cve-customer-rollup" data-cve="${escAttr(hit.cve_id)}">Checking other affected customers…</p>
-            ${renderChannelPicker(`vuln-slack-channels-${idx}`, idx === 0)}
+            ${renderCustomerPicker(`vuln-slack-channels-${idx}`, hit.customer_id, idx === 0)}
             <div class="vuln-advisory-actions">
                 <button class="btn btn-primary btn-sm" id="vuln-advisory-btn-${idx}"
                     onclick="createAdvisory(${item.article_id}, '${escAttr(hit.cve_id)}', '${escAttr(hit.matched_tech)}', ${idx}, ${hit.customer_id || 'null'}, '${escAttr(hit.customer_name || '')}')">
@@ -784,73 +788,154 @@ function renderCveRollup(customers) {
     return `<strong>Affects ${customers.length} customer${customers.length === 1 ? '' : 's'}:</strong> ${parts.join('; ')}`;
 }
 
-// --- Slack distribution ---------------------------------------------------
+// --- Advisory distribution ------------------------------------------------
+//
+// Analysts pick customers, not channels. Each customer carries its own
+// channels and its own approved message format, so choosing a channel
+// directly would say nothing about which wording to send.
 
 let slackChannelState = null;
 
 async function ensureSlackChannels() {
     if (slackChannelState) return slackChannelState;
+    let configured = false;
+    let error = null;
     try {
         const res = await fetch('/api/slack/channels');
         const data = await res.json();
-        slackChannelState = {
-            configured: !!data.configured,
-            channels: data.channels || [],
-            error: data.error || null,
-        };
+        configured = !!data.configured;
+        error = data.error || null;
     } catch (e) {
-        slackChannelState = { configured: false, channels: [], error: null };
+        configured = false;
     }
+
+    let customers = [];
+    try {
+        const res = await fetch('/api/customers');
+        const all = await res.json();
+        customers = (Array.isArray(all) ? all : []).map(c => ({
+            id: c.id,
+            name: c.name,
+            channels: c.slack_channels || [],
+            hasFormat: !!((c.notification_template || '').trim()),
+        }));
+    } catch (e) {
+        customers = [];
+    }
+
+    slackChannelState = { configured, customers, error };
     return slackChannelState;
 }
 
-// showEmptyHint is set for the first hit only, so a misconfigured bot explains
-// itself once per modal instead of once per match.
-function renderChannelPicker(selectId, showEmptyHint) {
+function slackAvailable() {
+    return !!(slackChannelState && slackChannelState.configured);
+}
+
+// preselectId is the customer the match belongs to, so the common case of
+// notifying exactly that customer needs no clicks.
+// showEmptyHint is set for the first hit only, so a misconfigured setup
+// explains itself once per modal instead of once per match.
+function renderCustomerPicker(pickerId, preselectId, showEmptyHint) {
     const state = slackChannelState;
     if (!state || !state.configured) return '';
-    if (!state.channels.length) {
+
+    const deliverable = state.customers.filter(c => c.channels.length);
+    if (!deliverable.length) {
         if (!showEmptyHint) return '';
         const why = state.error
             ? escHtml(state.error)
-            : 'invite the bot to a channel with /invite';
-        return `<p class="form-hint slack-picker-empty">Slack is enabled but no channels are available — ${why}.</p>`;
+            : 'no customer has Slack channels configured yet — set them on the Customers page';
+        return `<p class="form-hint slack-picker-empty">Slack is enabled but nothing can be sent: ${why}.</p>`;
     }
-    const options = state.channels.map(c => `
-        <option value="${escAttr(c.id)}" data-name="${escAttr(c.name)}">
-            #${escHtml(c.name)}${c.is_private ? ' (private)' : ''}
-        </option>`).join('');
+
+    const rows = deliverable.map(c => {
+        const checked = (preselectId && Number(preselectId) === Number(c.id)) ? ' checked' : '';
+        const channels = c.channels.map(ch => escHtml(ch.name)).join(', ');
+        return `
+            <label class="advisory-customer-option" data-customer-id="${escAttr(String(c.id))}">
+                <input type="checkbox" class="advisory-customer-checkbox"
+                       value="${escAttr(String(c.id))}" data-name="${escAttr(c.name)}"${checked}>
+                <span class="advisory-customer-name">${escHtml(c.name)}</span>
+                <span class="advisory-customer-sent"></span>
+                <span class="advisory-customer-channels">${channels}</span>
+            </label>`;
+    }).join('');
+
     return `
-        <div class="slack-channel-picker">
-            <label for="${selectId}">Send to Slack channels</label>
-            <select id="${selectId}" class="form-input" multiple size="4">${options}</select>
-            <span class="form-hint">Optional — hold Ctrl/Cmd to select several. The PDF is attached to the message.</span>
+        <div class="advisory-customer-picker" id="${pickerId}">
+            <label class="advisory-customer-label">Notify customers</label>
+            <div class="advisory-customer-options">${rows}</div>
+            <span class="form-hint">
+                Each customer receives the advisory in its own approved format, in its own channels.
+            </span>
         </div>
     `;
 }
 
-async function distributeAdvisory(advisoryId, selectId, resultBox) {
-    const select = document.getElementById(selectId);
-    if (!advisoryId || !select) return;
-    const selected = Array.from(select.selectedOptions);
-    if (!selected.length) return;
+// --- Already-distributed marking -----------------------------------------
+//
+// A CVE can be written up more than once — a second article, a corrected
+// advisory — and the customer does not want it twice. Anyone already served
+// is labelled and un-ticked, so re-sending is possible but never accidental.
 
-    const channelNames = {};
-    selected.forEach(o => { channelNames[o.value] = o.dataset.name; });
+async function markAlreadySent(pickerId, scope) {
+    const picker = document.getElementById(pickerId);
+    if (!picker) return;
+
+    // A vulnerability dedups on its CVE, threat intelligence on its article,
+    // and an already-created advisory can ask about itself.
+    let url = null;
+    if (scope.cveId) url = `/api/cve/${encodeURIComponent(scope.cveId)}/distributions`;
+    else if (scope.articleId) url = `/api/articles/${scope.articleId}/distributions`;
+    else if (scope.advisoryId) url = `/api/advisories/${scope.advisoryId}/recipients`;
+    if (!url) return;
+
+    let recipients = [];
+    try {
+        const res = await fetch(url);
+        if (!res.ok) return;
+        recipients = (await res.json()).recipients || [];
+    } catch (e) {
+        return;  // Never block a send because the history could not be read.
+    }
+
+    recipients.forEach(r => {
+        if (r.customer_id == null) return;
+        const row = picker.querySelector(`.advisory-customer-option[data-customer-id="${r.customer_id}"]`);
+        if (!row) return;
+
+        const box = row.querySelector('.advisory-customer-checkbox');
+        if (box) box.checked = false;
+        row.classList.add('already-sent');
+
+        const label = row.querySelector('.advisory-customer-sent');
+        if (!label) return;
+        const when = formatDate(r.last_sent);
+        const again = r.send_count > 1 ? ` ×${r.send_count}` : '';
+        label.textContent = `already sent ${when}${again}`;
+        label.title = `Delivered to ${r.channels.join(', ')} on ${when}. `
+            + 'Tick to send again.';
+    });
+}
+
+async function distributeAdvisory(advisoryId, pickerId, resultBox) {
+    const picker = document.getElementById(pickerId);
+    if (!advisoryId || !picker) return;
+    const selected = Array.from(
+        picker.querySelectorAll('.advisory-customer-checkbox:checked')
+    );
+    if (!selected.length) return;
 
     const line = document.createElement('div');
     line.className = 'slack-distribution-result';
-    line.textContent = 'Sending to Slack…';
+    line.textContent = `Sending to ${selected.length} customer${selected.length === 1 ? '' : 's'}…`;
     resultBox.appendChild(line);
 
     try {
         const res = await fetch(`/api/advisories/${advisoryId}/distribute`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                channels: selected.map(o => o.value),
-                channel_names: channelNames,
-            }),
+            body: JSON.stringify({ customers: selected.map(o => Number(o.value)) }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Slack distribution failed');
@@ -861,13 +946,31 @@ async function distributeAdvisory(advisoryId, selectId, resultBox) {
 }
 
 function renderDistributionResults(results) {
-    const rows = results.map(r => {
-        const name = r.channel_name ? `#${r.channel_name}` : r.channel_id;
-        return r.status === 'sent'
-            ? `<li style="color:var(--accent-green);">${escHtml(name)} — sent</li>`
-            : `<li style="color:var(--accent-red);">${escHtml(name)} — ${escHtml(r.error_message || 'failed')}</li>`;
+    // Grouped by customer, because that is the unit the analyst chose and the
+    // unit a distinct message was rendered for.
+    const groups = new Map();
+    results.forEach(r => {
+        const key = r.customer_name || 'Direct send';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(r);
+    });
+
+    const blocks = Array.from(groups.entries()).map(([customer, rows]) => {
+        const items = rows.map(r => {
+            const name = r.channel_name
+                ? `#${String(r.channel_name).replace(/^#/, '')}`
+                : r.channel_id;
+            return r.status === 'sent'
+                ? `<li style="color:var(--accent-green);">${escHtml(name)} — sent</li>`
+                : `<li style="color:var(--accent-red);">${escHtml(name)} — ${escHtml(r.error_message || 'failed')}</li>`;
+        }).join('');
+        return `<li class="slack-result-customer"><strong>${escHtml(customer)}</strong>
+                    <ul class="slack-result-list">${items}</ul></li>`;
     }).join('');
-    return `<strong>Slack delivery</strong><ul class="slack-result-list">${rows}</ul>`;
+
+    const sent = results.filter(r => r.status === 'sent').length;
+    return `<strong>Slack delivery — ${sent} of ${results.length} channel${results.length === 1 ? '' : 's'}</strong>
+            <ul class="slack-result-list">${blocks}</ul>`;
 }
 
 async function analyzeMissingThreats() {
@@ -980,7 +1083,11 @@ async function loadAdvisories() {
         } else {
             empty.style.display = 'none';
             await ensureSlackChannels();
-            data.advisories.forEach(a => list.appendChild(createAdvisoryCard(a)));
+            // One ledger read for the whole page, rather than a request per
+            // card, so "who already has this" is visible without opening
+            // anything.
+            const ledger = await loadDistributionLedger();
+            data.advisories.forEach(a => list.appendChild(createAdvisoryCard(a, ledger)));
         }
         updateAdvisoryPagination();
     } catch (e) {
@@ -988,7 +1095,41 @@ async function loadAdvisories() {
     }
 }
 
-function createAdvisoryCard(item) {
+// Keyed by CVE where there is one, and by advisory otherwise, matching how
+// the ledger groups deliveries.
+async function loadDistributionLedger() {
+    try {
+        const res = await fetch('/api/distributions/ledger');
+        if (!res.ok) return {};
+        const entries = (await res.json()).entries || [];
+        const map = {};
+        entries.forEach(e => {
+            map[e.cve_id ? `cve:${e.cve_id}` : `advisory:${e.advisory_id}`] = e;
+        });
+        return map;
+    } catch (e) {
+        return {};
+    }
+}
+
+function renderSentSummary(item, ledger) {
+    const entry = ledger[item.cve_id ? `cve:${item.cve_id}` : `advisory:${item.id}`];
+    if (!entry) return '';
+
+    const sent = (entry.recipients || []).map(r =>
+        `${escHtml(r.customer_name || 'unknown')} <span class="advisory-sent-when">${escHtml(formatDate(r.last_sent))}</span>`
+    ).join(', ');
+    const failed = (entry.failed || []).length;
+
+    if (!sent && !failed) return '';
+    return `
+        <p class="advisory-sent-summary">
+            ${sent ? `<strong>Distributed to:</strong> ${sent}` : '<strong>Not yet distributed</strong>'}
+            ${failed ? `<span class="advisory-sent-failed">${failed} failed deliver${failed === 1 ? 'y' : 'ies'}</span>` : ''}
+        </p>`;
+}
+
+function createAdvisoryCard(item, ledger = {}) {
     const card = document.createElement('article');
     card.className = 'threat-card advisory-card';
     const dateStr = formatDate(item.created_date);
@@ -1012,9 +1153,10 @@ function createAdvisoryCard(item) {
             ${item.article_id ? `<a href="/article/${item.article_id}" class="btn btn-secondary btn-sm">Source article</a>` : ''}
             ${slackAvailable() ? `<button class="btn btn-secondary btn-sm" onclick="toggleAdvisorySlack(${item.id})">Send to Slack</button>` : ''}
         </div>
+        ${renderSentSummary(item, ledger)}
         ${slackAvailable() ? `
         <div class="advisory-slack-panel" id="advisory-slack-panel-${item.id}" style="display:none;">
-            ${renderChannelPicker(`advisory-slack-channels-${item.id}`)}
+            ${renderCustomerPicker(`advisory-slack-channels-${item.id}`, item.customer_id, true)}
             <button class="btn btn-primary btn-sm" onclick="sendAdvisoryToSlack(${item.id})">Send</button>
             <div class="vuln-advisory-result" id="advisory-slack-result-${item.id}"></div>
         </div>` : ''}
@@ -1022,13 +1164,16 @@ function createAdvisoryCard(item) {
     return card;
 }
 
-function slackAvailable() {
-    return !!(slackChannelState && slackChannelState.configured && slackChannelState.channels.length);
-}
-
 function toggleAdvisorySlack(advisoryId) {
     const panel = document.getElementById(`advisory-slack-panel-${advisoryId}`);
-    if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    if (!panel) return;
+    const opening = panel.style.display === 'none';
+    panel.style.display = opening ? 'block' : 'none';
+    // Read on open rather than on render, so the history reflects sends made
+    // since the tab was loaded.
+    if (opening) {
+        markAlreadySent(`advisory-slack-channels-${advisoryId}`, { advisoryId });
+    }
 }
 
 async function sendAdvisoryToSlack(advisoryId) {

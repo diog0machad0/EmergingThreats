@@ -126,7 +126,7 @@ function sendMessage() {
         loadingEl.remove();
 
         if (data.error === 'no_api_key') {
-            appendMessage('assistant', 'No LLM API key is configured. Add an OpenAI, Anthropic, or OpenRouter key in [Settings](/settings) to use Intelligence search.', []);
+            appendMessage('assistant', 'No LLM API key is configured. Add an OpenAI, Anthropic, OpenRouter, or Gemini key in [Settings](/settings) to use Intelligence search.', []);
         } else if (data.error) {
             appendMessage('assistant', 'An error occurred: ' + escHtml(data.error), []);
         } else {

@@ -1,12 +1,23 @@
 ---
-description: Approved Security Vulnerability Notification template used when distributing advisories
+description: Per-customer advisory notification formats and the rules for rendering them
 alwaysApply: true
 ---
 
-# Security Vulnerability Notification template
+# Advisory notification formats
 
-This is the business-approved format for the message that accompanies a distributed
-advisory PDF. Do not reword the labels, reorder the fields, or add sections.
+Customers do **not** share a message format. Each one has its own approved
+wording, stored per customer and edited on the Customers page, so onboarding a
+client is configuration rather than a code change.
+
+Storage: `customers.notification_template` and `customers.ti_notification_template`,
+with `customers.slack_channels` holding the destinations. The templates below
+are the seeds in `EmergingJoes/advisory_notification.py`; once a customer row
+exists, the **database is the source of truth**, not the constant.
+
+## Evoke — structured field block
+
+`NOTIFICATION_TEMPLATE` / `EVOKE_VULN_TEMPLATE`. Do not reword the labels,
+reorder the fields, or add sections.
 
 ```
 Security Vulnerability Notification
@@ -32,24 +43,54 @@ Attachments:
 
 Note there is no blank line between the last recommendation bullet and `Attachments:`.
 
-## Threat intelligence variant
+Threat intelligence variant (`kind = 'threat_intelligence'`): same layout,
+retitled `Threat Intelligence Notification`, `Vulnerability Name` reads
+`Threat Name`, and the `CVE(s)`, `Affected Versions` and `Fixed Version` lines
+are removed. Everything else, including `Advisory ID` and the priority bullet,
+is unchanged.
 
-Advisories with `kind = 'threat_intelligence'` use the same layout, retitled
-`Threat Intelligence Notification`, with `Vulnerability Name` reading `Threat Name`
-and the `CVE(s)`, `Affected Versions`, and `Fixed Version` lines removed. Everything
-else, including `Advisory ID` and the priority bullet, is unchanged.
+## Fidelidade — covering note
+
+`FIDELIDADE_VULN_TEMPLATE`. Prose, not a field block. The literal
+`@SOCIberia_DXC` mention and the `[Security Advisory]` tag line are part of the
+approved format and must survive rendering verbatim.
+
+```
+Hello,
+
+We are sharing the attached advisory regarding <CVE-ID> (<VULNERABILITY-NAME>), a <VULNERABILITY-TYPE / SHORT DESCRIPTION> affecting <AFFECTED PRODUCT / COMPONENT> that <BRIEF DESCRIPTION OF HOW THE VULNERABILITY CAN BE TRIGGERED OR EXPLOITED>.
+
+Please review the attached advisory, validating <WHAT SHOULD BE CHECKED / EXPOSURE CONDITION>, and prioritizing <PATCHING / MITIGATION ACTION> for <SYSTEMS OR ASSETS THAT SHOULD RECEIVE PRIORITY>.
+
+[Security Advisory] @SOCIberia_DXC [<SEVERITY>]
+
+Thanks,
+```
+
+The threat intelligence variant (`FIDELIDADE_TI_TEMPLATE`) was derived from the
+above, since TI advisories carry no CVE or version numbers. It has **not** been
+confirmed by the business — check before relying on it.
 
 ## Implementation rules
 
-- Source of truth: `NOTIFICATION_TEMPLATE` and `TI_NOTIFICATION_TEMPLATE` in
-  `EmergingJoes/advisory_notification.py`. Change them there first.
-- The LLM returns **field values as JSON only**. Layout is rendered in code by `render()`,
-  which must stay pure (no network, config, or file reads) so it is testable without an API key.
+- Templates are Slack mrkdwn emitted **verbatim**. Only substituted values are
+  escaped, so mentions, tag lines and bold markers survive.
+- Placeholders are `<UPPERCASE>` tokens, matched by `PLACEHOLDER_RE`. Lowercase
+  text in angle brackets is left alone so ordinary prose is never eaten.
+- The LLM returns **field values as JSON only**. Layout is substituted in code by
+  `render_template()` and `render()`, both of which must stay pure (no network,
+  config, or file reads) so message shape is testable without an API key.
 - Never let the model emit the assembled message; it drops and renames lines.
-- Unknown fields render as `N/A` (or `Not available` for Fixed Version). The prompt forbids
-  guessing versions, advisory IDs, and severities.
-- Advisory Date, Attachments, and the priority bullet are computed in code, not by the LLM.
-  Remediation deadlines come from `REMEDIATION_DAYS`, not from the model.
-- Message building must never block distribution: fall back to database-derived fields on any failure.
-- Do **not** put the cross-article "which other customers are affected" roll-up into the message.
-  Slack channels are shared and it would leak one customer's exposure to another.
+- Tokens in `COMPUTED_TOKENS` are filled from data we already hold and are never
+  sent to the model. Advisory Date, Attachments, CVE, severity and the priority
+  bullet are all computed. Remediation deadlines come from `REMEDIATION_DAYS`.
+- Unknown fields render as `N/A` (or `Not available` for Fixed Version). The
+  prompt forbids guessing versions, advisory IDs, and severities.
+- Message building must never block distribution: fall back to database-derived
+  fields on any failure, and to the standard field block when a customer has no
+  template.
+- Changing a seed constant does **not** change an existing customer. Backfill
+  only fills columns that are still empty, so an analyst's edit always wins.
+- Do **not** put the cross-article "which other customers are affected" roll-up
+  into the message. Even with per-customer channels, it would leak one client's
+  exposure to another.

@@ -43,6 +43,10 @@ from database import (
     get_advisory,
     save_advisory_distribution,
     get_advisory_distributions,
+    get_advisory_recipients,
+    get_article_recipients,
+    get_cve_recipients,
+    get_distribution_ledger,
     get_customers_for_cve,
     backfill_advisories_from_scriba,
     get_apt_groups_from_summaries,
@@ -214,6 +218,46 @@ def api_ingested():
     return jsonify({"articles": articles, "total": total, "page": page, "limit": limit})
 
 
+def _clean_slack_channels(raw):
+    """Normalize the channel list from the customer form.
+
+    Accepts [{"id","name"}] from the picker, or bare names typed by hand when
+    Slack is unreachable. An id is what actually addresses a channel, so an
+    entry without one is kept by name and resolved at send time.
+    """
+    if isinstance(raw, str):
+        raw = [s.strip() for s in raw.split("\n") if s.strip()]
+    if not isinstance(raw, list):
+        return []
+
+    cleaned, seen = [], set()
+    for entry in raw:
+        if isinstance(entry, dict):
+            channel_id = str(entry.get("id") or "").strip()
+            name = str(entry.get("name") or "").strip()
+        else:
+            channel_id, name = "", str(entry or "").strip()
+        if not channel_id and not name:
+            continue
+        if name and not name.startswith("#"):
+            name = f"#{name}"
+        key = channel_id or name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({"id": channel_id, "name": name})
+    return cleaned
+
+
+@app.route("/api/customers/template-defaults")
+def api_customer_template_defaults():
+    """Seed templates for a new customer, so the editor is never blank."""
+    from advisory_notification import default_templates_for
+
+    vuln, ti = default_templates_for(request.args.get("name"))
+    return jsonify({"notification_template": vuln, "ti_notification_template": ti})
+
+
 @app.route("/api/customers", methods=["GET", "POST"])
 def api_customers():
     """List or create customers."""
@@ -235,8 +279,15 @@ def api_customers():
     if isinstance(tech_stack, str):
         tech_stack = [s.strip() for s in tech_stack.split("\n") if s.strip()]
 
+    channels = _clean_slack_channels(data.get("slack_channels"))
+
     try:
-        customer = create_customer(name, business, country, affiliates, tech_stack)
+        customer = create_customer(
+            name, business, country, affiliates, tech_stack,
+            slack_channels=channels,
+            notification_template=data.get("notification_template") or "",
+            ti_notification_template=data.get("ti_notification_template") or "",
+        )
         return jsonify(customer), 201
     except Exception as e:
         if "UNIQUE" in str(e):
@@ -272,8 +323,15 @@ def api_customer(customer_id):
     if isinstance(tech_stack, str):
         tech_stack = [s.strip() for s in tech_stack.split("\n") if s.strip()]
 
+    channels = _clean_slack_channels(data.get("slack_channels"))
+
     try:
-        if not update_customer(customer_id, name, business, country, affiliates, tech_stack):
+        if not update_customer(
+            customer_id, name, business, country, affiliates, tech_stack,
+            slack_channels=channels,
+            notification_template=data.get("notification_template") or "",
+            ti_notification_template=data.get("ti_notification_template") or "",
+        ):
             return jsonify({"error": "Customer not found"}), 404
         return jsonify(get_customer(customer_id))
     except Exception as e:
@@ -604,6 +662,196 @@ def api_advisory_detail(advisory_id):
     return jsonify(row)
 
 
+def _customer_channels_for_advisory(advisory):
+    """Return the advisory customer's channels, filling in missing ids.
+
+    Seeded and hand-typed channels carry only a name, but files_upload_v2
+    addresses a channel by id, so names are resolved against the workspace
+    listing at send time.
+    """
+    from advisory_notification import resolve_customer
+
+    customer = resolve_customer(advisory)
+    return _resolve_channel_ids((customer or {}).get("slack_channels") or [])
+
+
+@app.route("/api/cve/<cve_id>/distributions")
+def api_cve_distributions(cve_id):
+    """Who has already been sent an advisory for this CVE.
+
+    Read before the picker pre-selects anyone, so a customer that already has
+    it is not silently sent it again.
+    """
+    return jsonify({
+        "cve_id": (cve_id or "").strip().upper(),
+        "recipients": get_cve_recipients(cve_id),
+    })
+
+
+@app.route("/api/articles/<int:article_id>/distributions")
+def api_article_distributions(article_id):
+    """Who has already been sent anything written from this article.
+
+    Used by the threat intelligence queue, which has no CVE to key on.
+    """
+    return jsonify({
+        "article_id": article_id,
+        "recipients": get_article_recipients(article_id),
+    })
+
+
+@app.route("/api/advisories/<int:advisory_id>/recipients")
+def api_advisory_recipients(advisory_id):
+    """Who has already been sent this advisory, or anything for its CVE.
+
+    Threat intelligence has no CVE, so it falls back to the advisory itself.
+    """
+    advisory = get_advisory(advisory_id)
+    if not advisory:
+        return jsonify({"error": "Advisory not found"}), 404
+
+    cve_id = (advisory.get("cve_id") or "").strip().upper()
+    return jsonify({
+        "cve_id": cve_id or None,
+        "scope": "cve" if cve_id else "advisory",
+        "recipients": get_cve_recipients(cve_id) if cve_id
+                      else get_advisory_recipients(advisory_id),
+    })
+
+
+@app.route("/api/distributions/ledger")
+def api_distribution_ledger():
+    """What has been distributed so far, and to whom."""
+    try:
+        limit = min(int(request.args.get("limit", 200)), 1000)
+    except (TypeError, ValueError):
+        limit = 200
+    return jsonify({"entries": get_distribution_ledger(limit)})
+
+
+def _resolve_distribution_targets(advisory, data):
+    """Turn a distribute request into per-customer recipient groups.
+
+    Analysts choose customers, not channels: each customer has its own
+    channels and its own approved message format, so the two cannot be
+    flattened into a single list. A bare ``channels`` list is still accepted
+    for direct sends and older callers.
+
+    Returns:
+        (targets, error_message) — error_message is None on success.
+    """
+    customer_ids = data.get("customers") or data.get("customer_ids") or []
+    if customer_ids:
+        targets, missing = [], []
+        for raw_id in customer_ids:
+            try:
+                customer = get_customer(int(raw_id))
+            except (TypeError, ValueError):
+                customer = None
+            if not customer:
+                missing.append(str(raw_id))
+                continue
+            channels = _resolve_channel_ids(customer.get("slack_channels") or [])
+            if not channels:
+                missing.append(f"{customer['name']} (no channels configured)")
+                continue
+            targets.append({
+                "customer_id": customer["id"],
+                "customer_name": customer["name"],
+                "channels": channels,
+            })
+        if not targets:
+            detail = ", ".join(missing) if missing else "none selected"
+            return None, f"No deliverable customers: {detail}"
+        return targets, None
+
+    channels = data.get("channels") or []
+    if isinstance(channels, list) and channels:
+        names = data.get("channel_names") or {}
+        if not isinstance(names, dict):
+            names = {}
+        return [{
+            "customer_id": None,
+            "customer_name": advisory.get("customer_name"),
+            "channels": [{"id": c, "name": names.get(c)} for c in channels],
+        }], None
+
+    # Nothing chosen: fall back to the advisory's own customer.
+    configured = _customer_channels_for_advisory(advisory)
+    deliverable = [c for c in configured if c.get("id")]
+    if not deliverable:
+        return None, "No customers selected, and none are configured for this advisory"
+    return [{
+        "customer_id": None,
+        "customer_name": advisory.get("customer_name"),
+        "channels": deliverable,
+    }], None
+
+
+def _resolve_channel_ids(channels):
+    """Fill in ids for channels stored by name only."""
+    resolved = [dict(c) for c in channels]
+    if any(not c.get("id") for c in resolved):
+        try:
+            from slack_client import list_member_channels
+
+            by_name = {
+                f"#{c['name'].lstrip('#').lower()}": c["id"]
+                for c in list_member_channels()
+            }
+            for entry in resolved:
+                if not entry.get("id"):
+                    entry["id"] = by_name.get((entry.get("name") or "").lower(), "")
+        except Exception as e:
+            logger.warning("Could not resolve Slack channel ids by name: %s", e)
+    return [c for c in resolved if c.get("id")]
+
+
+@app.route("/api/advisories/<int:advisory_id>/channels")
+def api_advisory_channels(advisory_id):
+    """Channels configured for this advisory's customer, for pre-selection."""
+    advisory = get_advisory(advisory_id)
+    if not advisory:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({
+        "customer_name": advisory.get("customer_name"),
+        "channels": _customer_channels_for_advisory(advisory),
+    })
+
+
+@app.route("/api/advisories/<int:advisory_id>/message-preview", methods=["POST"])
+def api_advisory_message_preview(advisory_id):
+    """Render the Slack message for an advisory without sending it.
+
+    The message differs per customer now, so an analyst needs to be able to
+    read what will go out before it does.
+    """
+    from advisory_notification import build
+
+    advisory = get_advisory(advisory_id)
+    if not advisory:
+        return jsonify({"error": "Not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    use_llm = bool(data.get("use_llm", True))
+    try:
+        if data.get("customer_id"):
+            from advisory_notification import build_for_customer, prepare_fields
+
+            customer = get_customer(int(data["customer_id"]))
+            fields, used_llm, markdown_text = prepare_fields(advisory, use_llm)
+            text = build_for_customer(
+                advisory, fields, customer=customer,
+                markdown_text=markdown_text, use_llm=used_llm,
+            )
+        else:
+            text, used_llm = build(advisory, use_llm=use_llm)
+    except Exception as e:
+        logger.exception("Message preview failed")
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"message": text, "used_llm": used_llm})
+
+
 @app.route("/api/advisories/<int:advisory_id>/distribute", methods=["POST"])
 def api_advisory_distribute(advisory_id):
     """Post an advisory PDF to the Slack channels named in the request body.
@@ -621,13 +869,9 @@ def api_advisory_distribute(advisory_id):
         return jsonify({"error": "Not found"}), 404
 
     data = request.get_json(silent=True) or {}
-    channels = data.get("channels") or []
-    if not isinstance(channels, list) or not channels:
-        return jsonify({"error": "No channels selected"}), 400
-
-    channel_names = data.get("channel_names") or {}
-    if not isinstance(channel_names, dict):
-        channel_names = {}
+    targets, error = _resolve_distribution_targets(advisory, data)
+    if error:
+        return jsonify({"error": error}), 400
 
     article_url = None
     if advisory.get("article_id"):
@@ -636,24 +880,25 @@ def api_advisory_distribute(advisory_id):
             article_url = article.get("url")
 
     # The cross-article customer roll-up is deliberately not in the Slack
-    # message: a shared channel would expose which other customers are
-    # vulnerable. It stays in the analyst UI, where it belongs.
+    # message. Even with per-customer channels, naming who else is exposed
+    # would leak one client's risk posture to another.
     try:
-        results = distribute_advisory(advisory, channels, article_url)
+        results = distribute_advisory(advisory, targets, article_url)
     except Exception as e:
         logger.exception("Slack distribution failed")
         return jsonify({"error": str(e)}), 500
 
     for result in results:
-        channel_id = result["channel_id"]
-        result["channel_name"] = channel_names.get(channel_id)
         save_advisory_distribution(
             advisory_id=advisory_id,
-            channel_id=channel_id,
-            channel_name=result["channel_name"],
+            channel_id=result["channel_id"],
+            channel_name=result.get("channel_name"),
             status=result["status"],
             error_message=result.get("error_message"),
             slack_ts=result.get("slack_ts"),
+            customer_id=result.get("customer_id"),
+            customer_name=result.get("customer_name"),
+            cve_id=advisory.get("cve_id"),
         )
 
     sent = sum(1 for r in results if r["status"] == "sent")
@@ -1195,8 +1440,10 @@ def api_settings():
         config = load_config()
 
         if "llm_provider" in data:
+            from llm_client import SUPPORTED_PROVIDERS
+
             provider = (data["llm_provider"] or "openai").strip().lower()
-            if provider not in ("openai", "anthropic", "openrouter"):
+            if provider not in SUPPORTED_PROVIDERS:
                 provider = "openai"
             config["llm_provider"] = provider
         if "openai_api_key" in data:
@@ -1211,6 +1458,10 @@ def api_settings():
             config["openrouter_api_key"] = data["openrouter_api_key"]
         if "openrouter_model" in data:
             config["openrouter_model"] = data["openrouter_model"]
+        if "gemini_api_key" in data:
+            config["gemini_api_key"] = data["gemini_api_key"]
+        if "gemini_model" in data:
+            config["gemini_model"] = data["gemini_model"]
         if "malpedia_api_key" in data:
             config["malpedia_api_key"] = data["malpedia_api_key"]
         if "fetch_interval_minutes" in data:
@@ -1355,6 +1606,92 @@ def api_test_openrouter_key():
         return jsonify({"valid": True})
     except Exception as e:
         return jsonify({"valid": False, "error": str(e)})
+
+
+@app.route("/api/test-gemini-key", methods=["POST"])
+def api_test_gemini_key():
+    """Validate a Gemini API key with a minimal chat completion.
+
+    Exercises the same OpenAI-compatible endpoint the app uses at runtime, so a
+    pass here also confirms the selected model is reachable on the key's tier.
+
+    Request body (JSON):
+        api_key: The Google AI Studio API key to test.
+        model: Optional Gemini model id.
+
+    Returns:
+        JSON with ``valid`` boolean and optional ``error`` string.
+    """
+    from llm_client import GEMINI_BASE_URL, GEMINI_DEFAULT_MODEL, _gemini_thinking_params
+
+    data = request.get_json() or {}
+    api_key = data.get("api_key", "").strip()
+    model = (data.get("model") or GEMINI_DEFAULT_MODEL).strip()
+    if not api_key:
+        return jsonify({"valid": False, "error": "No API key provided"})
+
+    try:
+        from openai import OpenAI
+
+        extra_params, _ = _gemini_thinking_params(model)
+        client = OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL)
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Hi"}],
+            max_tokens=5,
+            **extra_params,
+        )
+        return jsonify({"valid": True})
+    except Exception as e:
+        return jsonify({"valid": False, "error": str(e)})
+
+
+@app.route("/api/gemini-models", methods=["POST"])
+def api_gemini_models():
+    """List the Gemini chat models the supplied key can actually reach.
+
+    Google retires model ids on its own schedule, so the Settings dropdown is
+    populated from this rather than from a hardcoded list that silently goes
+    stale. Falls back to the saved key when the request omits one.
+
+    Request body (JSON):
+        api_key: Optional key to enumerate; defaults to the configured one.
+
+    Returns:
+        JSON with ``models`` (list of ids, free-tier families first) and
+        optional ``error`` string.
+    """
+    from llm_client import GEMINI_BASE_URL
+
+    data = request.get_json() or {}
+    api_key = (data.get("api_key") or "").strip()
+    if not api_key:
+        api_key = load_config().get("gemini_api_key", "").strip()
+    if not api_key:
+        return jsonify({"models": [], "error": "No API key provided"})
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL)
+        ids = [m.id.replace("models/", "") for m in client.models.list()]
+    except Exception as e:
+        return jsonify({"models": [], "error": str(e)})
+
+    # Only Flash and Flash-Lite are on the free tier. Drop everything that is
+    # not a plain text-in/text-out chat model: the audio, live, omni and image
+    # variants share the "flash" name but cannot serve this pipeline.
+    excluded = (
+        "embedding", "embed", "tts", "image", "vision", "aqa", "learnlm",
+        "native-audio", "audio", "live", "omni", "thinking",
+    )
+    chat = [
+        m for m in ids
+        if "flash" in m and not any(tok in m for tok in excluded)
+    ]
+    lite = sorted(m for m in chat if "lite" in m)
+    rest = sorted(m for m in chat if "lite" not in m)
+    return jsonify({"models": lite + rest})
 
 
 @app.route("/api/test-malpedia-key", methods=["POST"])

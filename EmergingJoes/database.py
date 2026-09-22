@@ -132,6 +132,9 @@ def init_db():
             country TEXT NOT NULL,
             known_affiliates TEXT NOT NULL DEFAULT '[]',
             known_tech_stack TEXT NOT NULL DEFAULT '[]',
+            slack_channels TEXT NOT NULL DEFAULT '[]',
+            notification_template TEXT NOT NULL DEFAULT '',
+            ti_notification_template TEXT NOT NULL DEFAULT '',
             created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -230,6 +233,12 @@ def init_db():
         "ALTER TABLE emerging_threat_analyses ADD COLUMN triaged_date TIMESTAMP",
         "ALTER TABLE vulnerability_analyses ADD COLUMN triage_status TEXT NOT NULL DEFAULT 'pending'",
         "ALTER TABLE vulnerability_analyses ADD COLUMN triaged_date TIMESTAMP",
+        "ALTER TABLE advisory_distributions ADD COLUMN customer_id INTEGER",
+        "ALTER TABLE advisory_distributions ADD COLUMN customer_name TEXT",
+        "ALTER TABLE advisory_distributions ADD COLUMN cve_id TEXT",
+        "ALTER TABLE customers ADD COLUMN slack_channels TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE customers ADD COLUMN notification_template TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE customers ADD COLUMN ti_notification_template TEXT NOT NULL DEFAULT ''",
     ]:
         try:
             conn.execute(col_sql)
@@ -244,11 +253,95 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vulnerability_analyses_triage ON vulnerability_analyses(triage_status)"
         )
+        # Created after the migrations above, since cve_id is one of them.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_advisory_distributions_cve "
+            "ON advisory_distributions(cve_id, customer_id)"
+        )
         conn.commit()
     except Exception:
         pass
 
     seed_default_customers()
+    backfill_customer_notification_defaults()
+    backfill_distribution_provenance()
+
+
+def backfill_distribution_provenance():
+    """Stamp CVE and customer onto deliveries recorded before those columns.
+
+    Safe to derive because a distribution belongs to exactly one advisory, and
+    an advisory carries one CVE and one customer, so nothing here is a guess.
+    Without it, a send made before this migration would not count as "already
+    distributed" and the analyst would be invited to send it twice.
+
+    Only NULLs are filled, so the send-time snapshot always wins.
+    """
+    conn = get_connection()
+    for column, source in (
+        ("cve_id", "a.cve_id"),
+        ("customer_id", "a.customer_id"),
+        ("customer_name", "a.customer_name"),
+    ):
+        try:
+            conn.execute(
+                f"""UPDATE advisory_distributions
+                    SET {column} = (SELECT {source} FROM advisories a
+                                    WHERE a.id = advisory_distributions.advisory_id)
+                    WHERE {column} IS NULL"""
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+
+def backfill_customer_notification_defaults():
+    """Fill notification settings for customers that predate these columns.
+
+    The message format used to be hardcoded, so a customer created before this
+    migration has no format of its own. Filling an empty template with the
+    matching default is behaviour-preserving: the default *is* what that
+    customer was already being sent. Non-empty values are never touched, so an
+    analyst's edit always wins.
+    """
+    from advisory_notification import default_templates_for
+
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """SELECT id, name, slack_channels, notification_template, ti_notification_template
+               FROM customers"""
+        ).fetchall()
+    except Exception:
+        return
+
+    seeded_channels = {
+        "evoke": "#evoke-threatintel",
+        "fidelidade": "#fidelidade-threatintel",
+    }
+
+    for row in rows:
+        vuln, ti = default_templates_for(row["name"])
+        updates, params = [], []
+
+        if not (row["notification_template"] or "").strip():
+            updates.append("notification_template=?")
+            params.append(vuln)
+        if not (row["ti_notification_template"] or "").strip():
+            updates.append("ti_notification_template=?")
+            params.append(ti)
+
+        channel = seeded_channels.get((row["name"] or "").strip().lower())
+        if channel and not _parse_json_list(row["slack_channels"]):
+            updates.append("slack_channels=?")
+            params.append(_json.dumps([{"id": "", "name": channel}]))
+
+        if updates:
+            params.append(row["id"])
+            conn.execute(
+                f"UPDATE customers SET {', '.join(updates)} WHERE id=?", params
+            )
+    conn.commit()
 
 
 def seed_default_customers():
@@ -263,6 +356,7 @@ def seed_default_customers():
             "name": "Evoke",
             "business": "International betting and gaming (evoke plc, formerly 888 Holdings) — William Hill, 888, Mr Green, and Winner",
             "country": "United Kingdom",
+            "slack_channel": "#evoke-threatintel",
             "known_affiliates": [
                 "William Hill",
                 "888casino",
@@ -291,6 +385,7 @@ def seed_default_customers():
             "name": "Fidelidade",
             "business": "Insurance — market leader in life and non-life insurance in Portugal (Fidelidade – Companhia de Seguros, S.A.)",
             "country": "Portugal",
+            "slack_channel": "#fidelidade-threatintel",
             "known_affiliates": [
                 "Millennium Gain Limited / Fosun International (parent group)",
                 "Caixa Geral de Depósitos (strategic shareholder)",
@@ -317,16 +412,25 @@ def seed_default_customers():
         },
     ]
 
+    from advisory_notification import default_templates_for
+
     for row in defaults:
+        vuln_template, ti_template = default_templates_for(row["name"])
         conn.execute(
-            """INSERT INTO customers (name, business, country, known_affiliates, known_tech_stack)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO customers (name, business, country, known_affiliates, known_tech_stack,
+                                      slack_channels, notification_template, ti_notification_template)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 row["name"],
                 row["business"],
                 row["country"],
                 _json.dumps(row["known_affiliates"]),
                 _json.dumps(row["known_tech_stack"]),
+                # Channel ids are workspace-specific, so only the name is
+                # seeded. The picker fills in the id on first save.
+                _json.dumps([{"id": "", "name": row["slack_channel"]}]),
+                vuln_template,
+                ti_template,
             ),
         )
     conn.commit()
@@ -348,6 +452,13 @@ def _customer_row_to_dict(row):
     d = dict(row)
     d["known_affiliates"] = _parse_json_list(d.get("known_affiliates"))
     d["known_tech_stack"] = _parse_json_list(d.get("known_tech_stack"))
+    # Each entry is {"id": "C0123ABC", "name": "#evoke-threatintel"}. The id is
+    # what files_upload_v2 needs; the name is only for display and audit rows.
+    d["slack_channels"] = [
+        c for c in _parse_json_list(d.get("slack_channels")) if isinstance(c, dict)
+    ]
+    d["notification_template"] = d.get("notification_template") or ""
+    d["ti_notification_template"] = d.get("ti_notification_template") or ""
     return d
 
 
@@ -372,18 +483,23 @@ def get_customer(customer_id):
     return _customer_row_to_dict(row) if row else None
 
 
-def create_customer(name, business, country, known_affiliates=None, known_tech_stack=None):
+def create_customer(name, business, country, known_affiliates=None, known_tech_stack=None,
+                    slack_channels=None, notification_template="", ti_notification_template=""):
     """Insert a new customer record."""
     conn = get_connection()
     conn.execute(
-        """INSERT INTO customers (name, business, country, known_affiliates, known_tech_stack)
-           VALUES (?, ?, ?, ?, ?)""",
+        """INSERT INTO customers (name, business, country, known_affiliates, known_tech_stack,
+                                  slack_channels, notification_template, ti_notification_template)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             name.strip(),
             business.strip(),
             country.strip(),
             _json.dumps(known_affiliates or []),
             _json.dumps(known_tech_stack or []),
+            _json.dumps(slack_channels or []),
+            notification_template or "",
+            ti_notification_template or "",
         ),
     )
     conn.commit()
@@ -391,12 +507,15 @@ def create_customer(name, business, country, known_affiliates=None, known_tech_s
     return _customer_row_to_dict(row)
 
 
-def update_customer(customer_id, name, business, country, known_affiliates=None, known_tech_stack=None):
+def update_customer(customer_id, name, business, country, known_affiliates=None, known_tech_stack=None,
+                    slack_channels=None, notification_template="", ti_notification_template=""):
     """Update an existing customer. Returns True if a row was updated."""
     conn = get_connection()
     cur = conn.execute(
         """UPDATE customers SET name=?, business=?, country=?,
-           known_affiliates=?, known_tech_stack=?, updated_date=CURRENT_TIMESTAMP
+           known_affiliates=?, known_tech_stack=?, slack_channels=?,
+           notification_template=?, ti_notification_template=?,
+           updated_date=CURRENT_TIMESTAMP
            WHERE id=?""",
         (
             name.strip(),
@@ -404,11 +523,29 @@ def update_customer(customer_id, name, business, country, known_affiliates=None,
             country.strip(),
             _json.dumps(known_affiliates or []),
             _json.dumps(known_tech_stack or []),
+            _json.dumps(slack_channels or []),
+            notification_template or "",
+            ti_notification_template or "",
             customer_id,
         ),
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def get_customer_by_name(name):
+    """Return a customer by exact name, or None.
+
+    Advisories store ``customer_name`` alongside ``customer_id``; this is the
+    lookup used when only the name survived.
+    """
+    if not name:
+        return None
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM customers WHERE name = ? COLLATE NOCASE", (name.strip(),)
+    ).fetchone()
+    return _customer_row_to_dict(row) if row else None
 
 
 def delete_customer(customer_id):
@@ -878,14 +1015,28 @@ def save_advisory_distribution(
     status="sent",
     error_message=None,
     slack_ts=None,
+    customer_id=None,
+    customer_name=None,
+    cve_id=None,
 ):
-    """Record one advisory delivery attempt to one Slack channel."""
+    """Record one advisory delivery attempt to one Slack channel.
+
+    The customer is stored because an advisory can go to several customers at
+    once, each in its own format, so "where was this sent" is only half the
+    answer without "on whose behalf".
+
+    The CVE is stored rather than joined through ``advisories`` because this
+    table is an audit trail: it should say what was true when the message went
+    out, and stay that way even if the advisory row is later corrected.
+    """
     conn = get_connection()
     cursor = conn.execute(
         """INSERT INTO advisory_distributions (
-               advisory_id, channel_id, channel_name, status, error_message, slack_ts
-           ) VALUES (?, ?, ?, ?, ?, ?)""",
-        (advisory_id, channel_id, channel_name, status, error_message, slack_ts),
+               advisory_id, channel_id, channel_name, status, error_message,
+               slack_ts, customer_id, customer_name, cve_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (advisory_id, channel_id, channel_name, status, error_message, slack_ts,
+         customer_id, customer_name, (cve_id or "").strip().upper() or None),
     )
     conn.commit()
     return cursor.lastrowid
@@ -896,13 +1047,166 @@ def get_advisory_distributions(advisory_id):
     conn = get_connection()
     rows = conn.execute(
         """SELECT id, advisory_id, channel_id, channel_name, status,
-                  error_message, slack_ts, created_date
+                  error_message, slack_ts, created_date, customer_id,
+                  customer_name, cve_id
            FROM advisory_distributions
            WHERE advisory_id = ?
            ORDER BY created_date DESC, id DESC""",
         (advisory_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _group_recipients(rows):
+    """Collapse delivery rows into one entry per customer.
+
+    Only successful deliveries count as "already notified": a failed upload
+    means the customer never saw it, and treating that as sent would suppress
+    the retry the analyst needs to make.
+    """
+    recipients = {}
+    for row in rows:
+        if row["status"] != "sent":
+            continue
+        key = row["customer_id"] if row["customer_id"] is not None else \
+            (row["customer_name"] or row["channel_id"])
+        entry = recipients.get(key)
+        if entry is None:
+            entry = {
+                "customer_id": row["customer_id"],
+                "customer_name": row["customer_name"],
+                "first_sent": row["created_date"],
+                "last_sent": row["created_date"],
+                "send_count": 0,
+                "channels": [],
+                "advisory_ids": [],
+            }
+            recipients[key] = entry
+        entry["send_count"] += 1
+        # Rows arrive newest first, so the oldest seen is the first send.
+        entry["first_sent"] = row["created_date"]
+        name = row["channel_name"] or row["channel_id"]
+        if name and name not in entry["channels"]:
+            entry["channels"].append(name)
+        if row["advisory_id"] not in entry["advisory_ids"]:
+            entry["advisory_ids"].append(row["advisory_id"])
+
+    return sorted(
+        recipients.values(),
+        key=lambda r: (r["customer_name"] or "").lower(),
+    )
+
+
+def get_cve_recipients(cve_id):
+    """Return which customers have already been sent an advisory for a CVE.
+
+    Keyed on the CVE rather than the advisory, because the same CVE can be
+    written up more than once (a second article, a corrected advisory) and the
+    customer does not want it twice. This is the question the distribution
+    picker asks before pre-selecting anyone.
+
+    Returns:
+        List of ``{customer_id, customer_name, first_sent, last_sent,
+        send_count, channels, advisory_ids}`` dicts, sorted by customer name.
+    """
+    cve_id = (cve_id or "").strip().upper()
+    if not cve_id:
+        return []
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT advisory_id, channel_id, channel_name, status, created_date,
+                  customer_id, customer_name
+           FROM advisory_distributions
+           WHERE cve_id = ?
+           ORDER BY created_date DESC, id DESC""",
+        (cve_id,),
+    ).fetchall()
+    return _group_recipients(rows)
+
+
+def get_advisory_recipients(advisory_id):
+    """Return which customers have already been sent one specific advisory.
+
+    The fallback for threat intelligence, which has no CVE to key on.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT advisory_id, channel_id, channel_name, status, created_date,
+                  customer_id, customer_name
+           FROM advisory_distributions
+           WHERE advisory_id = ?
+           ORDER BY created_date DESC, id DESC""",
+        (advisory_id,),
+    ).fetchall()
+    return _group_recipients(rows)
+
+
+def get_article_recipients(article_id):
+    """Return which customers have been sent anything written from an article.
+
+    The dedup key for threat intelligence, which carries no CVE: the unit of
+    work there is the article, so a second advisory from the same article is
+    the duplicate worth warning about.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT d.advisory_id, d.channel_id, d.channel_name, d.status,
+                  d.created_date, d.customer_id, d.customer_name
+           FROM advisory_distributions d
+           JOIN advisories a ON a.id = d.advisory_id
+           WHERE a.article_id = ?
+           ORDER BY d.created_date DESC, d.id DESC""",
+        (article_id,),
+    ).fetchall()
+    return _group_recipients(rows)
+
+
+def get_distribution_ledger(limit=200):
+    """Return what has been distributed, one row per CVE, with its recipients.
+
+    The analyst-facing answer to "have we handled this CVE, and for whom",
+    without needing to open each advisory in turn.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT d.cve_id, d.advisory_id, d.channel_id, d.channel_name,
+                  d.status, d.created_date, d.customer_id, d.customer_name,
+                  a.title, a.kind
+           FROM advisory_distributions d
+           LEFT JOIN advisories a ON a.id = d.advisory_id
+           ORDER BY d.created_date DESC, d.id DESC"""
+    ).fetchall()
+
+    ledger = {}
+    for row in rows:
+        # Threat intelligence has no CVE, so it is tracked per advisory.
+        key = row["cve_id"] or f"advisory:{row['advisory_id']}"
+        entry = ledger.get(key)
+        if entry is None:
+            entry = {
+                "cve_id": row["cve_id"],
+                "advisory_id": row["advisory_id"],
+                "title": row["title"],
+                "kind": row["kind"],
+                "last_sent": row["created_date"],
+                "rows": [],
+            }
+            ledger[key] = entry
+        entry["rows"].append(row)
+
+    # Rows are newest first, and dicts keep insertion order, so the first
+    # `limit` keys are the most recently distributed.
+    out = []
+    for entry in list(ledger.values())[:limit]:
+        rows_ = entry.pop("rows")
+        entry["recipients"] = _group_recipients(rows_)
+        entry["failed"] = [
+            {"customer_name": r["customer_name"],
+             "channel_name": r["channel_name"] or r["channel_id"]}
+            for r in rows_ if r["status"] != "sent"
+        ]
+        out.append(entry)
+    return out
 
 
 def get_customers_for_cve(cve_id):
@@ -1830,7 +2134,7 @@ def get_all_embeddings(model_used=None):
     return [dict(r) for r in rows]
 
 
-def get_unembedded_articles(limit=50, article_ids=None):
+def get_unembedded_articles(limit=50, article_ids=None, model_used=None):
     """Fetch articles that have summaries but no embedding yet.
 
     Excludes articles whose summary has ``model_used='failed'``.
@@ -1838,11 +2142,23 @@ def get_unembedded_articles(limit=50, article_ids=None):
     Args:
         limit: Maximum number of articles to return.
         article_ids: Optional list of article IDs to restrict results to.
+        model_used: If provided, an article counts as unembedded unless it has
+            an embedding from *this* model. Switching embedding provider then
+            re-embeds the backlog, instead of leaving articles holding vectors
+            that cannot be compared against the new model's output.
 
     Returns:
         List of dicts with ``id``, ``title``, and ``summary_text``.
     """
     conn = get_connection()
+    # Restricting the join (not the WHERE clause) is what preserves the
+    # "no row means unembedded" test after filtering by model.
+    join_clause = "LEFT JOIN article_embeddings ae ON ae.article_id = a.id"
+    join_params = ()
+    if model_used:
+        join_clause += " AND ae.model_used = ?"
+        join_params = (model_used,)
+
     if article_ids:
         placeholders = ",".join("?" * len(article_ids))
         rows = conn.execute(
@@ -1850,7 +2166,7 @@ def get_unembedded_articles(limit=50, article_ids=None):
             SELECT a.id, a.title, sm.summary_text
             FROM articles a
             JOIN summaries sm ON sm.article_id = a.id
-            LEFT JOIN article_embeddings ae ON ae.article_id = a.id
+            {join_clause}
             WHERE ae.article_id IS NULL
               AND sm.summary_text IS NOT NULL AND sm.summary_text != ''
               AND sm.model_used != 'failed'
@@ -1858,22 +2174,22 @@ def get_unembedded_articles(limit=50, article_ids=None):
             ORDER BY a.fetched_date DESC
             LIMIT ?
             """,
-            (*article_ids, limit),
+            (*join_params, *article_ids, limit),
         ).fetchall()
     else:
         rows = conn.execute(
-            """
+            f"""
             SELECT a.id, a.title, sm.summary_text
             FROM articles a
             JOIN summaries sm ON sm.article_id = a.id
-            LEFT JOIN article_embeddings ae ON ae.article_id = a.id
+            {join_clause}
             WHERE ae.article_id IS NULL
               AND sm.summary_text IS NOT NULL AND sm.summary_text != ''
               AND sm.model_used != 'failed'
             ORDER BY a.fetched_date DESC
             LIMIT ?
             """,
-            (limit,),
+            (*join_params, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -2814,19 +3130,24 @@ def log_digest_sent(sent_at, article_ids, story_count):
     conn.commit()
 
 
-def get_articles_with_embeddings_since(since_dt):
+def get_articles_with_embeddings_since(since_dt, model_used=None):
     """Return articles that have summaries and embeddings created after since_dt.
 
     Args:
         since_dt: ISO datetime string (exclusive lower bound on summaries.created_date).
+        model_used: If provided, restrict to embeddings from this model. The
+            caller clusters these vectors against each other, so a mixed set
+            would compare vectors from different models and cluster on noise.
 
     Returns:
         List of dicts with keys: id, title, url, source_name, summary_text,
         executive_summary, details, mitigations, embedding (bytes blob).
     """
     conn = get_connection()
+    model_clause = " AND ae.model_used = ?" if model_used else ""
+    params = (since_dt, model_used) if model_used else (since_dt,)
     rows = conn.execute(
-        """
+        f"""
         SELECT a.id, a.title, a.url, s.name AS source_name,
                sm.summary_text, sm.novelty_notes, ae.embedding
         FROM articles a
@@ -2836,9 +3157,9 @@ def get_articles_with_embeddings_since(since_dt):
         WHERE sm.created_date > ?
           AND sm.model_used IS NOT NULL
           AND sm.model_used != 'failed'
-          AND sm.model_used != ''
+          AND sm.model_used != ''{model_clause}
         ORDER BY sm.created_date ASC
         """,
-        (since_dt,),
+        params,
     ).fetchall()
     return [dict(r) for r in rows]

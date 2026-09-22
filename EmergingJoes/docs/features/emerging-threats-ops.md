@@ -118,3 +118,16 @@ Filter dropdown: Queue (untriaged) | Triaged | All.
 ## Customers
 
 Configure footprint on `/customers`. Empty customer table may be seeded by `seed_default_customers()` on init.
+
+Each customer also carries its advisory distribution settings:
+
+- **Slack channels** (`slack_channels`) — where that customer's advisories are
+  sent, picked from the workspace listing or typed by hand.
+- **Vulnerability format** (`notification_template`) and **threat intelligence
+  format** (`ti_notification_template`) — that customer's approved message
+  wording. Empty means the standard field block.
+
+Formats differ per customer, so these are not cosmetic. See
+[slack-distribution.md](slack-distribution.md) for the placeholder rules.
+`backfill_customer_notification_defaults()` fills these columns for customers
+created before they existed, and never overwrites a non-empty value.

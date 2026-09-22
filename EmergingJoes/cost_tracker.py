@@ -15,6 +15,10 @@ _PRICING = {
     "claude-opus":   (5.00, 0.50,  25.00),   # Opus 4.6
     # OpenRouter free models
     ":free":         (0.00, 0.00,   0.00),
+    # Gemini — matched on the family rather than pinned ids, because Google
+    # retires and adds concrete versions constantly. Settings only offers
+    # free-tier Flash / Flash-Lite models, which cost nothing to call.
+    "gemini":        (0.00, 0.00,   0.00),
 }
 
 

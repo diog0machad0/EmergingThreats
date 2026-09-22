@@ -134,21 +134,74 @@ def _share_timestamp(response, channel_id):
     return None
 
 
-def distribute_advisory(advisory, channel_ids, article_url=None):
-    """Upload an advisory PDF with a crafted message to each channel.
+def normalize_targets(targets):
+    """Accept either recipient groups or a bare channel-id list.
+
+    A group is ``{customer_id, customer_name, channels: [{id, name}]}``. The
+    bare list form is kept so older callers and direct channel sends still
+    work; it becomes a single group with no customer, which renders in the
+    standard format.
+    """
+    groups = []
+    for entry in targets or []:
+        if isinstance(entry, str):
+            groups.append({
+                "customer_id": None, "customer_name": None,
+                "channels": [{"id": entry, "name": None}],
+            })
+            continue
+        if not isinstance(entry, dict):
+            continue
+        channels = [
+            {"id": c.get("id"), "name": c.get("name")}
+            if isinstance(c, dict) else {"id": c, "name": None}
+            for c in (entry.get("channels") or [])
+        ]
+        channels = [c for c in channels if c["id"]]
+        if not channels:
+            continue
+        groups.append({
+            "customer_id": entry.get("customer_id"),
+            "customer_name": entry.get("customer_name"),
+            "channels": channels,
+        })
+    return groups
+
+
+def _failure(group, channel, error):
+    return {
+        "channel_id": channel["id"],
+        "channel_name": channel.get("name"),
+        "customer_id": group.get("customer_id"),
+        "customer_name": group.get("customer_name"),
+        "status": "failed",
+        "error_message": error,
+        "slack_ts": None,
+    }
+
+
+def distribute_advisory(advisory, targets, article_url=None):
+    """Upload an advisory PDF to each recipient, in that recipient's format.
+
+    Customers do not share a message format, so the notification is rendered
+    once per customer rather than once per send. The advisory fields behind it
+    are extracted only once, so adding a recipient costs at most one small
+    follow-up call, and nothing at all for a customer whose format needs no
+    free-text placeholders.
 
     Each channel is attempted independently and its outcome recorded, so one
     bad channel (bot removed, renamed, archived) cannot stop delivery to the
     others. Never raises for a per-channel failure.
 
     Returns:
-        List of ``{channel_id, status, error_message, slack_ts}`` dicts where
-        ``status`` is ``"sent"`` or ``"failed"``.
+        List of ``{channel_id, channel_name, customer_id, customer_name,
+        status, error_message, slack_ts}`` dicts.
     """
-    results = []
-    channel_ids = [c for c in (channel_ids or []) if c]
-    if not channel_ids:
-        return results
+    from advisory_notification import build_for_customer, prepare_fields, resolve_customer
+
+    groups = normalize_targets(targets)
+    if not groups:
+        return []
 
     pdf_path = advisory.get("pdf_path") or ""
     pdf_filename = advisory.get("pdf_filename") or os.path.basename(pdf_path)
@@ -156,48 +209,64 @@ def distribute_advisory(advisory, channel_ids, article_url=None):
     if not pdf_path or not os.path.isfile(pdf_path):
         error = f"Advisory PDF not found on disk: {pdf_path or '(no path)'}"
         logger.warning(error)
-        return [
-            {"channel_id": cid, "status": "failed",
-             "error_message": error, "slack_ts": None}
-            for cid in channel_ids
-        ]
+        return [_failure(g, c, error) for g in groups for c in g["channels"]]
 
     try:
         client = _get_client()
     except Exception as e:
-        return [
-            {"channel_id": cid, "status": "failed",
-             "error_message": str(e), "slack_ts": None}
-            for cid in channel_ids
-        ]
+        return [_failure(g, c, str(e)) for g in groups for c in g["channels"]]
 
-    # Built once, before the loop: the notification costs an LLM call and is
-    # identical for every channel.
-    message = build_advisory_message(advisory, article_url)
+    # Customer-independent, so extracted once no matter how many recipients.
+    fields, used_llm, markdown_text = prepare_fields(advisory)
 
-    for channel_id in channel_ids:
+    results = []
+    for group in groups:
+        customer = None
+        if group.get("customer_id"):
+            try:
+                from database import get_customer
+
+                customer = get_customer(group["customer_id"])
+            except Exception as e:
+                logger.warning("Could not load customer %s: %s", group["customer_id"], e)
+        if customer is None and not group.get("customer_name"):
+            customer = resolve_customer(advisory)
+
         try:
-            resp = client.files_upload_v2(
-                channel=channel_id,
-                file=pdf_path,
-                filename=pdf_filename,
-                title=advisory.get("title") or pdf_filename,
-                initial_comment=message,
+            message = build_for_customer(
+                advisory, fields, customer=customer, article_url=article_url,
+                markdown_text=markdown_text, use_llm=used_llm,
             )
-            results.append({
-                "channel_id": channel_id,
-                "status": "sent",
-                "error_message": None,
-                "slack_ts": _share_timestamp(resp, channel_id),
-            })
-            logger.info(f"Advisory {pdf_filename} sent to Slack channel {channel_id}")
         except Exception as e:
-            logger.warning(f"Slack delivery to {channel_id} failed: {e}")
-            results.append({
-                "channel_id": channel_id,
-                "status": "failed",
-                "error_message": str(e),
-                "slack_ts": None,
-            })
+            logger.exception("Notification build failed for %s", group.get("customer_name"))
+            results.extend(_failure(group, c, f"Message build failed: {e}")
+                           for c in group["channels"])
+            continue
+
+        for channel in group["channels"]:
+            try:
+                resp = client.files_upload_v2(
+                    channel=channel["id"],
+                    file=pdf_path,
+                    filename=pdf_filename,
+                    title=advisory.get("title") or pdf_filename,
+                    initial_comment=message,
+                )
+                results.append({
+                    "channel_id": channel["id"],
+                    "channel_name": channel.get("name"),
+                    "customer_id": group.get("customer_id"),
+                    "customer_name": group.get("customer_name"),
+                    "status": "sent",
+                    "error_message": None,
+                    "slack_ts": _share_timestamp(resp, channel["id"]),
+                })
+                logger.info(
+                    "Advisory %s sent to %s for %s",
+                    pdf_filename, channel["id"], group.get("customer_name") or "(no customer)",
+                )
+            except Exception as e:
+                logger.warning("Slack delivery to %s failed: %s", channel["id"], e)
+                results.append(_failure(group, channel, str(e)))
 
     return results

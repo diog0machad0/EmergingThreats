@@ -34,6 +34,81 @@
                     <label for="customer-tech">Known tech stack</label>
                     <textarea id="customer-tech" class="form-input" rows="4" placeholder="One technology per line (e.g. Ivanti VPN)"></textarea>
                 </div>
+
+                <div class="form-group customer-form-full">
+                    <label for="customer-channels">Slack channels for notifications</label>
+                    <div class="customer-channel-picker" id="customer-channel-picker">
+                        <p class="customer-list-empty" id="customer-channels-hint">Loading channels...</p>
+                    </div>
+                    <textarea id="customer-channels" class="form-input" rows="2"
+                              placeholder="One channel per line, e.g. #evoke-threatintel"></textarea>
+                    <p class="form-hint">
+                        Tick the channels above, or type them here when Slack is unreachable.
+                        A typed channel is matched to its id when the advisory is sent, which
+                        only works if the bot has been invited to it.
+                    </p>
+                </div>
+
+                <div class="form-group customer-form-full">
+                    <label for="customer-template">Vulnerability notification format</label>
+                    <textarea id="customer-template" class="form-input customer-template-input"
+                              rows="14" spellcheck="false"></textarea>
+                    <p class="form-hint">
+                        Written in Slack formatting. Text is sent as-is, so mentions like
+                        <code>@SOCIberia_DXC</code> and tags like <code>[Security Advisory]</code> survive.
+                        Placeholders in <code>&lt;UPPERCASE&gt;</code> are filled in per advisory.
+                    </p>
+                </div>
+
+                <div class="form-group customer-form-full">
+                    <label for="customer-ti-template">Threat intelligence notification format</label>
+                    <textarea id="customer-ti-template" class="form-input customer-template-input"
+                              rows="12" spellcheck="false"></textarea>
+                    <p class="form-hint">
+                        Used for advisories with no CVE. Leave either box empty to fall back to
+                        the standard field block.
+                    </p>
+                </div>
+
+                <div class="form-group customer-form-full">
+                    <details class="customer-placeholder-help">
+                        <summary>Available placeholders</summary>
+                        <div class="customer-placeholder-grid">
+                            <div>
+                                <h4>Filled from our own data</h4>
+                                <ul class="customer-list">
+                                    <li><code>&lt;CVE-ID&gt;</code> — CVE from triage</li>
+                                    <li><code>&lt;SEVERITY&gt;</code> — Critical / High / Medium / Low</li>
+                                    <li><code>&lt;ADVISORY-DATE&gt;</code> — date the advisory was created</li>
+                                    <li><code>&lt;REMEDIATION-DATE&gt;</code> — deadline derived from severity</li>
+                                    <li><code>&lt;PDF-FILENAME&gt;</code> — attached file name</li>
+                                    <li><code>&lt;CUSTOMER-NAME&gt;</code> — this customer</li>
+                                    <li><code>&lt;RECOMMENDATIONS&gt;</code> — action bullets</li>
+                                    <li><code>&lt;PRIORITY-BULLET&gt;</code> — priority and due date bullet</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <h4>Read out of the advisory</h4>
+                                <ul class="customer-list">
+                                    <li><code>&lt;VULNERABILITY-NAME&gt;</code> / <code>&lt;THREAT-NAME&gt;</code></li>
+                                    <li><code>&lt;VENDOR-PRODUCT&gt;</code></li>
+                                    <li><code>&lt;CVES&gt;</code> — every CVE covered</li>
+                                    <li><code>&lt;ADVISORY-ID&gt;</code></li>
+                                    <li><code>&lt;AFFECTED-VERSIONS&gt;</code></li>
+                                    <li><code>&lt;FIXED-VERSION&gt;</code></li>
+                                    <li><code>&lt;DESCRIPTION&gt;</code></li>
+                                </ul>
+                                <p class="form-hint">
+                                    Any other <code>&lt;UPPERCASE&gt;</code> placeholder you invent is written
+                                    per advisory from the advisory document. Name it descriptively, as in
+                                    <code>&lt;WHAT SHOULD BE CHECKED / EXPOSURE CONDITION&gt;</code>, because the
+                                    name is the only instruction given. Anything unanswerable becomes
+                                    <code>N/A</code>.
+                                </p>
+                            </div>
+                        </div>
+                    </details>
+                </div>
             </div>
             <div class="customer-form-actions">
                 <button type="submit" class="btn btn-primary" id="customer-submit-btn">Add Customer</button>
@@ -59,10 +134,12 @@
 {% block scripts %}
 <script>
 let customersSearchTimer = null;
+let slackChannels = [];
 
 document.addEventListener('DOMContentLoaded', () => {
     loadStats();
     loadCustomers();
+    loadSlackChannels().then(loadDefaultTemplates);
 
     const searchInput = document.getElementById('search-input');
     if (searchInput) {
@@ -117,6 +194,11 @@ function createCustomerCard(customer) {
                 <h4>Known tech stack</h4>
                 ${renderTechList(customer.known_tech_stack)}
             </div>
+            <div class="customer-list-block">
+                <h4>Advisory notifications</h4>
+                ${renderChannels(customer.slack_channels)}
+                ${renderFormatBadges(customer)}
+            </div>
         </div>
         <div class="customer-card-actions">
             <button class="btn btn-secondary btn-sm" onclick="editCustomer(${customer.id})">Edit</button>
@@ -135,6 +217,27 @@ function renderList(items, emptyText) {
         '</ul>';
 }
 
+function renderChannels(channels) {
+    if (!channels || channels.length === 0) {
+        return '<p class="customer-list-empty">No channels configured</p>';
+    }
+    return '<div class="customer-tech-tags">' +
+        channels.map(c => {
+            const unresolved = c.id ? '' : ' customer-channel-unresolved';
+            const title = c.id ? '' : ' title="Resolved to a channel id when sent"';
+            return `<span class="customer-tech-tag${unresolved}"${title}>${escHtml(c.name)}</span>`;
+        }).join('') +
+        '</div>';
+}
+
+function renderFormatBadges(customer) {
+    const vuln = (customer.notification_template || '').trim();
+    const ti = (customer.ti_notification_template || '').trim();
+    const label = (set, text) =>
+        `<span class="customer-format-badge${set ? ' is-custom' : ''}">${text}: ${set ? 'custom' : 'standard'}</span>`;
+    return `<div class="customer-format-badges">${label(vuln, 'Vulnerability')}${label(ti, 'Threat intel')}</div>`;
+}
+
 function renderTechList(items) {
     if (!items || items.length === 0) {
         return '<p class="customer-list-empty">No technologies listed</p>';
@@ -142,6 +245,65 @@ function renderTechList(items) {
     return '<div class="customer-tech-tags">' +
         items.map(i => `<span class="customer-tech-tag">${escHtml(i)}</span>`).join('') +
         '</div>';
+}
+
+async function loadSlackChannels() {
+    const picker = document.getElementById('customer-channel-picker');
+    const hint = document.getElementById('customer-channels-hint');
+    try {
+        const res = await fetch('/api/slack/channels');
+        const data = await res.json();
+        slackChannels = Array.isArray(data) ? data : (data.channels || []);
+        if (!slackChannels.length) {
+            hint.textContent = data.error
+                ? `Slack unavailable: ${data.error}. Type channel names below instead.`
+                : 'No channels found. Invite the bot to a channel, or type names below.';
+            return;
+        }
+        picker.innerHTML = slackChannels.map(c => `
+            <label class="customer-channel-option">
+                <input type="checkbox" class="customer-channel-checkbox"
+                       value="${escAttr(c.id)}" data-name="${escAttr('#' + String(c.name).replace(/^#/, ''))}">
+                <span>#${escHtml(String(c.name).replace(/^#/, ''))}</span>
+            </label>
+        `).join('');
+    } catch (e) {
+        hint.textContent = 'Could not reach Slack. Type channel names below instead.';
+    }
+}
+
+function selectedChannels() {
+    const chosen = [];
+    document.querySelectorAll('.customer-channel-checkbox:checked').forEach(box => {
+        chosen.push({ id: box.value, name: box.dataset.name });
+    });
+    // Names typed by hand are kept even when they match nothing in the
+    // picker, so a channel the bot has not joined yet can still be recorded.
+    const known = new Set(chosen.map(c => c.name.toLowerCase()));
+    linesFromTextarea('customer-channels').forEach(line => {
+        const name = line.startsWith('#') ? line : `#${line}`;
+        if (!known.has(name.toLowerCase())) chosen.push({ id: '', name });
+    });
+    return chosen;
+}
+
+function applyChannelSelection(channels) {
+    const configured = channels || [];
+    const byId = new Set(configured.filter(c => c.id).map(c => c.id));
+    const byName = new Set(configured.map(c => (c.name || '').toLowerCase()));
+    const matched = new Set();
+
+    document.querySelectorAll('.customer-channel-checkbox').forEach(box => {
+        const hit = byId.has(box.value) || byName.has((box.dataset.name || '').toLowerCase());
+        box.checked = hit;
+        if (hit) matched.add((box.dataset.name || '').toLowerCase());
+    });
+
+    const leftover = configured
+        .filter(c => !matched.has((c.name || '').toLowerCase()))
+        .map(c => c.name)
+        .filter(Boolean);
+    document.getElementById('customer-channels').value = leftover.join('\n');
 }
 
 function linesFromTextarea(id) {
@@ -160,6 +322,9 @@ async function submitCustomer(event) {
         country: document.getElementById('customer-country').value.trim(),
         known_affiliates: linesFromTextarea('customer-affiliates'),
         known_tech_stack: linesFromTextarea('customer-tech'),
+        slack_channels: selectedChannels(),
+        notification_template: document.getElementById('customer-template').value,
+        ti_notification_template: document.getElementById('customer-ti-template').value,
     };
     const status = document.getElementById('customer-form-status');
     status.textContent = 'Saving...';
@@ -200,6 +365,9 @@ async function editCustomer(id) {
         document.getElementById('customer-country').value = c.country;
         document.getElementById('customer-affiliates').value = (c.known_affiliates || []).join('\n');
         document.getElementById('customer-tech').value = (c.known_tech_stack || []).join('\n');
+        document.getElementById('customer-template').value = c.notification_template || '';
+        document.getElementById('customer-ti-template').value = c.ti_notification_template || '';
+        applyChannelSelection(c.slack_channels);
         document.getElementById('customer-form-title').textContent = 'Edit Customer';
         document.getElementById('customer-submit-btn').textContent = 'Save Changes';
         document.getElementById('customer-cancel-btn').style.display = 'inline-flex';
@@ -213,12 +381,25 @@ function cancelEditCustomer() {
     resetCustomerForm();
 }
 
-function resetCustomerForm() {
+async function resetCustomerForm() {
     document.getElementById('customer-form').reset();
     document.getElementById('customer-id').value = '';
     document.getElementById('customer-form-title').textContent = 'Add Customer';
     document.getElementById('customer-submit-btn').textContent = 'Add Customer';
     document.getElementById('customer-cancel-btn').style.display = 'none';
+    document.querySelectorAll('.customer-channel-checkbox').forEach(b => { b.checked = false; });
+    await loadDefaultTemplates();
+}
+
+async function loadDefaultTemplates() {
+    try {
+        const res = await fetch('/api/customers/template-defaults');
+        const d = await res.json();
+        document.getElementById('customer-template').value = d.notification_template || '';
+        document.getElementById('customer-ti-template').value = d.ti_notification_template || '';
+    } catch (e) {
+        console.error('Failed to load default templates:', e);
+    }
 }
 
 async function deleteCustomer(id, name) {
